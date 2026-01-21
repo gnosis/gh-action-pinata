@@ -1,0 +1,266 @@
+name: Pinata IPFS Deploy (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Deployment environment name (dev|prod)."
+        required: true
+        type: string
+      project_name:
+        description: "Project name used for Pinata metadata + IPNS key naming."
+        required: true
+        type: string
+      node_version:
+        description: "Node.js version used to build the caller repo and to run the uploader."
+        required: false
+        default: "20.15.1"
+        type: string
+      cache:
+        description: "Dependency cache manager for actions/setup-node (npm|pnpm|yarn)."
+        required: false
+        default: "npm"
+        type: string
+      pinata_upload_timeout_ms:
+        description: "Pinata upload HTTP request timeout in milliseconds."
+        required: false
+        default: 300000
+        type: number
+      install_command:
+        description: "Command to install dependencies in the caller repo."
+        required: false
+        default: "npm ci"
+        type: string
+      build_command:
+        description: "Command to build the caller repo."
+        required: false
+        default: "npm run build"
+        type: string
+      build_dir:
+        description: "Build output directory (relative to caller repo)."
+        required: false
+        default: "out"
+        type: string
+      enable_ipns:
+        description: "If true, attempts IPNS publish (requires installing kubo + running ipfs daemon)."
+        required: false
+        default: false
+        type: boolean
+      caller_repository:
+        description: "Optional: repository to deploy (owner/repo). Defaults to the caller."
+        required: false
+        type: string
+      caller_ref:
+        description: "Optional: git ref (sha/branch/tag) to deploy. Defaults to the caller ref."
+        required: false
+        type: string
+      pinata_action_ref:
+        description: "Git ref (branch/tag) to use for pinata action repo. Defaults to 'main'."
+        required: false
+        default: "main"
+        type: string
+    secrets:
+      PINATA_JWT:
+        required: true
+    outputs:
+      ipfs_hash:
+        description: "Deployed IPFS hash."
+        value: ${{ jobs.deploy.outputs.ipfs_hash }}
+      ipns_address:
+        description: "Published IPNS address (empty if enable_ipns=false)."
+        value: ${{ jobs.deploy.outputs.ipns_address }}
+      pinata_url:
+        description: "Pinata gateway URL for the deployed hash."
+        value: ${{ jobs.deploy.outputs.pinata_url }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      ipfs_hash: ${{ steps.deployment.outputs.ipfs_hash }}
+      ipns_address: ${{ steps.deployment.outputs.ipns_address }}
+      pinata_url: ${{ steps.deployment.outputs.pinata_url }}
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ inputs.caller_repository || github.repository }}
+          ref: ${{ inputs.caller_ref || github.sha }}
+          fetch-depth: 0
+          path: caller
+
+      - name: Checkout pinata deploy action repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.pinata_action_ref }}
+          fetch-depth: 1
+          path: pinata
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          # Cache will be most effective when caller uses matching lockfiles.
+          cache: ${{ inputs.cache }}
+          cache-dependency-path: |
+            caller/package-lock.json
+            caller/pnpm-lock.yaml
+            caller/yarn.lock
+            pinata/pnpm-lock.yaml
+
+      - name: Validate inputs
+        run: |
+          # Validate environment
+          if [ "${{ inputs.environment }}" != "dev" ] && [ "${{ inputs.environment }}" != "prod" ]; then
+            echo "❌ Error: environment must be 'dev' or 'prod', got: ${{ inputs.environment }}"
+            exit 1
+          fi
+
+          # Validate cache manager
+          if [ "${{ inputs.cache }}" != "npm" ] && [ "${{ inputs.cache }}" != "pnpm" ] && [ "${{ inputs.cache }}" != "yarn" ]; then
+            echo "❌ Error: cache must be one of: npm|pnpm|yarn, got: ${{ inputs.cache }}"
+            exit 1
+          fi
+
+          # Validate Pinata upload timeout
+          if [ "${{ inputs.pinata_upload_timeout_ms }}" -lt 10000 ]; then
+            echo "❌ Error: pinata_upload_timeout_ms must be >= 10000"
+            exit 1
+          fi
+          
+          # Validate project_name (sanitize for safety)
+          PROJECT_NAME="${{ inputs.project_name }}"
+          if [ -z "$PROJECT_NAME" ]; then
+            echo "❌ Error: project_name cannot be empty"
+            exit 1
+          fi
+          
+          # Check for dangerous characters in project_name
+          if echo "$PROJECT_NAME" | grep -qE '[^[:alnum:]-_]'; then
+            echo "⚠️  Warning: project_name contains special characters, will be sanitized"
+          fi
+          
+          echo "✅ Input validation passed"
+
+      - name: Install caller dependencies
+        timeout-minutes: 10
+        working-directory: caller
+        run: ${{ inputs.install_command }}
+
+      - name: Build caller repo
+        timeout-minutes: 30
+        working-directory: caller
+        run: ${{ inputs.build_command }}
+
+      - name: Validate build output
+        run: |
+          BUILD_DIR="caller/${{ inputs.build_dir }}"
+          if [ ! -d "$BUILD_DIR" ]; then
+            echo "❌ Error: Build directory '$BUILD_DIR' not found after build"
+            exit 1
+          fi
+          
+          FILE_COUNT=$(find "$BUILD_DIR" -type f | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "❌ Error: Build directory '$BUILD_DIR' is empty"
+            exit 1
+          fi
+          
+          echo "✅ Build output validated: $FILE_COUNT files found"
+
+      - name: Install pinata uploader dependencies
+        timeout-minutes: 5
+        working-directory: pinata
+        run: |
+          corepack enable
+          pnpm --version
+          pnpm install --frozen-lockfile
+
+      - name: Install jq/bc/curl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq bc curl
+
+      - name: Prepare deployment dirs
+        run: |
+          mkdir -p deployments/dev deployments/prod deployments/logs
+
+      - name: Deploy to Pinata (IPFS)
+        timeout-minutes: 20
+        env:
+          PINATA_JWT: ${{ secrets.PINATA_JWT }}
+          ENABLE_IPNS: ${{ inputs.enable_ipns }}
+          UPLOAD_SCRIPT_PATH: pinata/scripts/upload-pinata.mjs
+          PINATA_UPLOAD_TIMEOUT_MS: ${{ inputs.pinata_upload_timeout_ms }}
+        run: |
+          chmod +x pinata/scripts/deploy-to-pinata.sh
+          TS="$(date +%Y%m%d-%H%M%S)"
+          pinata/scripts/deploy-to-pinata.sh \
+            "${{ inputs.environment }}" \
+            "caller/${{ inputs.build_dir }}" \
+            "${{ inputs.project_name }}" \
+            "$TS" \
+            "${{ github.ref_name }}" \
+            "${{ github.sha }}"
+
+      - name: Extract deployment info
+        id: deployment
+        run: |
+          FILE="deployments/${{ inputs.environment }}/latest.json"
+          if [ ! -f "$FILE" ]; then
+            echo "❌ Deployment info not found at $FILE"
+            exit 1
+          fi
+          
+          # Validate JSON file
+          if ! jq empty "$FILE" 2>/dev/null; then
+            echo "❌ Invalid JSON in deployment file: $FILE"
+            exit 1
+          fi
+          
+          IPFS_HASH=$(jq -r '.ipfs_hash' "$FILE")
+          IPNS_ADDRESS=$(jq -r '.ipns_address // ""' "$FILE")
+          
+          if [ -z "$IPFS_HASH" ] || [ "$IPFS_HASH" = "null" ]; then
+            echo "❌ Invalid or missing IPFS hash in deployment file"
+            exit 1
+          fi
+          
+          PINATA_URL="https://gateway.pinata.cloud/ipfs/$IPFS_HASH"
+          echo "ipfs_hash=$IPFS_HASH" >> "$GITHUB_OUTPUT"
+          echo "ipns_address=$IPNS_ADDRESS" >> "$GITHUB_OUTPUT"
+          echo "pinata_url=$PINATA_URL" >> "$GITHUB_OUTPUT"
+          
+          echo "✅ Deployment info extracted successfully"
+
+      - name: Upload deployment artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: deployment-${{ inputs.environment }}-${{ github.sha }}
+          path: |
+            deployments/${{ inputs.environment }}/
+            deployments/logs/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Summary
+        if: success()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## ✅ Pinata IPFS Deployment Complete
+          
+          - **Environment**: \`${{ inputs.environment }}\`
+          - **Project**: \`${{ inputs.project_name }}\`
+          - **IPFS Hash**: \`${{ steps.deployment.outputs.ipfs_hash }}\`
+          - **Pinata URL**: [${{ steps.deployment.outputs.pinata_url }}](${{ steps.deployment.outputs.pinata_url }})
+          EOF
+          if [ -n "${{ steps.deployment.outputs.ipns_address }}" ]; then
+            cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          - **IPNS Address**: \`${{ steps.deployment.outputs.ipns_address }}\`
+          EOF
+          fi
+
