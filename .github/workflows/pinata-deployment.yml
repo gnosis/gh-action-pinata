@@ -85,7 +85,7 @@ jobs:
       - name: Checkout pinata deploy action repo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: ${{ github.repository }}
+          repository: gnosis/gh-action-pinata
           ref: ${{ inputs.pinata_action_ref }}
           fetch-depth: 1
           path: pinata
