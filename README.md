@@ -5,7 +5,6 @@ Reusable GitHub Actions workflow to deploy static builds to **IPFS via Pinata**.
 ## Features
 
 - Deploy static build directories to IPFS via Pinata
-- Optional IPNS publishing for stable URLs
 - Input validation and error handling
 - Automatic retry logic for network failures
 - Deployment metadata and artifact uploads
@@ -49,7 +48,7 @@ jobs:
 ### Required
 
 - `environment`: Deployment environment (`dev` or `prod`)
-- `project_name`: Project name (used for Pinata metadata and IPNS keys)
+- `project_name`: Project name (used for Pinata metadata)
 
 ### Optional
 
@@ -59,7 +58,6 @@ jobs:
 - `install_command`: Command to install dependencies (default: `"npm ci"`)
 - `build_command`: Command to build the project (default: `"npm run build"`)
 - `build_dir`: Build output directory relative to repo root (default: `"out"`)
-- `enable_ipns`: Enable IPNS publishing (default: `false`)
 - `caller_repository`: Override caller repository (default: caller's repo)
 - `caller_ref`: Override git ref to deploy (default: caller's ref)
 - `pinata_action_ref`: Git ref for pinata action repo (default: `"main"`)
@@ -71,7 +69,6 @@ jobs:
 ## Workflow Outputs
 
 - `ipfs_hash`: Deployed IPFS hash
-- `ipns_address`: Published IPNS address (empty if IPNS disabled)
 - `pinata_url`: Pinata gateway URL for the deployment
 
 ## Examples
@@ -104,20 +101,6 @@ jobs:
       install_command: pnpm install --frozen-lockfile
       build_command: pnpm build
       build_dir: dist
-    secrets:
-      PINATA_JWT: ${{ secrets.PINATA_JWT }}
-```
-
-### With IPNS enabled
-
-```yaml
-jobs:
-  deploy:
-    uses: <ORG>/gh-action-pinata/.github/workflows/pinata-deploy.yml@main
-    with:
-      environment: prod
-      project_name: my-app
-      enable_ipns: true
     secrets:
       PINATA_JWT: ${{ secrets.PINATA_JWT }}
 ```
@@ -185,15 +168,6 @@ jobs:
 - Verify Pinata service status
 - Check for rate limiting (429 errors)
 
-### IPNS publish failed
-
-**Error**: `Failed to publish to IPNS`
-
-**Solution**:
-- IPNS failures are non-fatal - IPFS hash is still valid
-- IPNS can take time to propagate (up to 24 hours)
-- Check IPFS daemon logs in workflow output
-
 ## Security Considerations
 
 - **Secrets**: Never commit `PINATA_JWT` to repositories
@@ -203,6 +177,5 @@ jobs:
 
 ## Limitations
 
-- **IPNS**: Requires installing and running IPFS daemon (adds ~2-3 minutes)
 - **File size**: Subject to Pinata API limits
 - **Rate limits**: Subject to Pinata API rate limits (automatic retries help)

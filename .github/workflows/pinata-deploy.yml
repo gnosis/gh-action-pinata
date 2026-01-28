@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       project_name:
-        description: "Project name used for Pinata metadata + IPNS key naming."
+        description: "Project name used for Pinata metadata."
         required: true
         type: string
       node_version:
@@ -41,11 +41,6 @@ on:
         required: false
         default: "out"
         type: string
-      enable_ipns:
-        description: "If true, attempts IPNS publish (requires installing kubo + running ipfs daemon)."
-        required: false
-        default: false
-        type: boolean
       caller_repository:
         description: "Optional: repository to deploy (owner/repo). Defaults to the caller."
         required: false
@@ -66,9 +61,6 @@ on:
       ipfs_hash:
         description: "Deployed IPFS hash."
         value: ${{ jobs.deploy.outputs.ipfs_hash }}
-      ipns_address:
-        description: "Published IPNS address (empty if enable_ipns=false)."
-        value: ${{ jobs.deploy.outputs.ipns_address }}
       pinata_url:
         description: "Pinata gateway URL for the deployed hash."
         value: ${{ jobs.deploy.outputs.pinata_url }}
@@ -80,7 +72,6 @@ jobs:
       contents: read
     outputs:
       ipfs_hash: ${{ steps.deployment.outputs.ipfs_hash }}
-      ipns_address: ${{ steps.deployment.outputs.ipns_address }}
       pinata_url: ${{ steps.deployment.outputs.pinata_url }}
     steps:
       - name: Checkout caller repo
@@ -103,7 +94,7 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ inputs.node_version }}
-          # Cache will be most effective when caller uses matching lockfiles.
+
           cache: ${{ inputs.cache }}
           cache-dependency-path: |
             caller/package-lock.json
@@ -131,16 +122,77 @@ jobs:
             exit 1
           fi
           
-          # Validate project_name (sanitize for safety)
+          # Validate project_name
           PROJECT_NAME="${{ inputs.project_name }}"
           if [ -z "$PROJECT_NAME" ]; then
             echo "❌ Error: project_name cannot be empty"
             exit 1
           fi
           
-          # Check for dangerous characters in project_name
           if echo "$PROJECT_NAME" | grep -qE '[^[:alnum:]-_]'; then
             echo "⚠️  Warning: project_name contains special characters, will be sanitized"
+          fi
+          
+          # Validate build_dir
+          BUILD_DIR="${{ inputs.build_dir }}"
+          if [ -z "$BUILD_DIR" ]; then
+            echo "❌ Error: build_dir cannot be empty"
+            exit 1
+          fi
+          if echo "$BUILD_DIR" | grep -qE '\.\.|^/'; then
+            echo "❌ Error: build_dir cannot contain '..' or be an absolute path, got: $BUILD_DIR"
+            exit 1
+          fi
+          
+          # Validate install_command
+          INSTALL_CMD="${{ inputs.install_command }}"
+          if [ -z "$INSTALL_CMD" ]; then
+            echo "❌ Error: install_command cannot be empty"
+            exit 1
+          fi
+          if echo "$INSTALL_CMD" | grep -qE '[;&|<>`$()]'; then
+            echo "❌ Error: install_command contains potentially dangerous characters"
+            exit 1
+          fi
+          
+          # Validate build_command
+          BUILD_CMD="${{ inputs.build_command }}"
+          if [ -z "$BUILD_CMD" ]; then
+            echo "❌ Error: build_command cannot be empty"
+            exit 1
+          fi
+          if echo "$BUILD_CMD" | grep -qE '[;&|<>`$()]'; then
+            echo "❌ Error: build_command contains potentially dangerous characters"
+            exit 1
+          fi
+          
+          # Validate caller_repository format (owner/repo)
+          if [ -n "${{ inputs.caller_repository }}" ]; then
+            CALLER_REPO="${{ inputs.caller_repository }}"
+            if ! echo "$CALLER_REPO" | grep -qE '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$'; then
+              echo "❌ Error: caller_repository must be in format 'owner/repo', got: $CALLER_REPO"
+              exit 1
+            fi
+          fi
+          
+          # Validate caller_ref
+          if [ -n "${{ inputs.caller_ref }}" ]; then
+            CALLER_REF="${{ inputs.caller_ref }}"
+            if echo "$CALLER_REF" | grep -qE '[;&|<>`$()]'; then
+              echo "❌ Error: caller_ref contains potentially dangerous characters"
+              exit 1
+            fi
+          fi
+          
+          # Validate pinata_action_ref
+          PINATA_REF="${{ inputs.pinata_action_ref }}"
+          if [ -z "$PINATA_REF" ]; then
+            echo "❌ Error: pinata_action_ref cannot be empty"
+            exit 1
+          fi
+          if echo "$PINATA_REF" | grep -qE '[;&|<>`$()]'; then
+            echo "❌ Error: pinata_action_ref contains potentially dangerous characters"
+            exit 1
           fi
           
           echo "✅ Input validation passed"
@@ -148,12 +200,16 @@ jobs:
       - name: Install caller dependencies
         timeout-minutes: 10
         working-directory: caller
-        run: ${{ inputs.install_command }}
+        shell: bash
+        run: |
+          ${{ inputs.install_command }}
 
       - name: Build caller repo
         timeout-minutes: 30
         working-directory: caller
-        run: ${{ inputs.build_command }}
+        shell: bash
+        run: |
+          ${{ inputs.build_command }}
 
       - name: Validate build output
         run: |
@@ -179,20 +235,19 @@ jobs:
           pnpm --version
           pnpm install --frozen-lockfile
 
-      - name: Install jq/bc/curl
+      - name: Install jq/curl
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq bc curl
+          sudo apt-get install -y jq curl
 
       - name: Prepare deployment dirs
         run: |
-          mkdir -p deployments/dev deployments/prod deployments/logs
+          mkdir -p deployments/${{ inputs.environment }} deployments/logs
 
       - name: Deploy to Pinata (IPFS)
         timeout-minutes: 20
         env:
           PINATA_JWT: ${{ secrets.PINATA_JWT }}
-          ENABLE_IPNS: ${{ inputs.enable_ipns }}
           UPLOAD_SCRIPT_PATH: pinata/scripts/upload-pinata.mjs
           PINATA_UPLOAD_TIMEOUT_MS: ${{ inputs.pinata_upload_timeout_ms }}
         run: |
@@ -222,7 +277,6 @@ jobs:
           fi
           
           IPFS_HASH=$(jq -r '.ipfs_hash' "$FILE")
-          IPNS_ADDRESS=$(jq -r '.ipns_address // ""' "$FILE")
           
           if [ -z "$IPFS_HASH" ] || [ "$IPFS_HASH" = "null" ]; then
             echo "❌ Invalid or missing IPFS hash in deployment file"
@@ -231,7 +285,6 @@ jobs:
           
           PINATA_URL="https://gateway.pinata.cloud/ipfs/$IPFS_HASH"
           echo "ipfs_hash=$IPFS_HASH" >> "$GITHUB_OUTPUT"
-          echo "ipns_address=$IPNS_ADDRESS" >> "$GITHUB_OUTPUT"
           echo "pinata_url=$PINATA_URL" >> "$GITHUB_OUTPUT"
           
           echo "✅ Deployment info extracted successfully"
@@ -258,9 +311,4 @@ jobs:
           - **IPFS Hash**: \`${{ steps.deployment.outputs.ipfs_hash }}\`
           - **Pinata URL**: [${{ steps.deployment.outputs.pinata_url }}](${{ steps.deployment.outputs.pinata_url }})
           EOF
-          if [ -n "${{ steps.deployment.outputs.ipns_address }}" ]; then
-            cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          - **IPNS Address**: \`${{ steps.deployment.outputs.ipns_address }}\`
-          EOF
-          fi
 
