@@ -154,7 +154,7 @@ jobs:
             exit 1
           fi
 
-          if echo "$PROJECT_NAME" | grep -qE '[^[:alnum:]-_]'; then
+          if echo "$PROJECT_NAME" | grep -qE '[^[:alnum:]_-]'; then
             echo "⚠️  Warning: project_name contains special characters, will be sanitized"
           fi
 
@@ -206,9 +206,7 @@ jobs:
                   echo "❌ Error: build_env key must be [A-Z0-9_]+, got: $KEY"
                   exit 1
                 fi
-              done << 'EOF'
-            ${{ inputs.build_env }}
-            EOF
+              done < <(printf '%s\n' "${{ inputs.build_env }}")
             fi
           fi
 
@@ -276,9 +274,7 @@ jobs:
             KEY="${line%%=*}"
             VALUE="${line#*=}"
             printf '%s=%s\n' "$KEY" "$VALUE" >> "$GITHUB_ENV"
-          done << 'EOF'
-          ${{ inputs.build_env }}
-          EOF
+          done < <(printf '%s\n' "${{ inputs.build_env }}")
 
       - name: Build caller repo
         if: ${{ !inputs.use_prebuilt_build }}
