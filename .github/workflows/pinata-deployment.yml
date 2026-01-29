@@ -4,78 +4,88 @@ on:
   workflow_call:
     inputs:
       environment:
-        description: "Deployment environment name (dev|prod)."
+        description: 'Deployment environment name (dev|prod).'
         required: true
         type: string
       project_name:
-        description: "Project name used for Pinata metadata."
+        description: 'Project name used for Pinata metadata.'
         required: true
         type: string
       node_version:
-        description: "Node.js version used to build the caller repo and to run the uploader."
+        description: 'Node.js version used to build the caller repo and to run the uploader.'
         required: false
-        default: "20.15.1"
+        default: '20.15.1'
         type: string
       cache:
-        description: "Dependency cache manager for actions/setup-node (npm|pnpm|yarn)."
+        description: 'Dependency cache manager for actions/setup-node (npm|pnpm|yarn).'
         required: false
-        default: "npm"
+        default: 'npm'
         type: string
       pinata_upload_timeout_ms:
-        description: "Pinata upload HTTP request timeout in milliseconds."
+        description: 'Pinata upload HTTP request timeout in milliseconds.'
         required: false
         default: 300000
         type: number
       install_command:
-        description: "Command to install dependencies in the caller repo."
+        description: 'Command to install dependencies in the caller repo.'
         required: false
-        default: "npm ci"
+        default: 'npm ci'
         type: string
       build_command:
-        description: "Command to build the caller repo."
+        description: 'Command to build the caller repo.'
         required: false
-        default: "npm run build"
+        default: 'npm run build'
         type: string
       build_env:
-        description: "Optional newline-separated KEY=VALUE envs for build."
+        description: 'Optional newline-separated KEY=VALUE envs for build.'
         required: false
-        default: ""
+        default: ''
+        type: string
+      use_prebuilt_build:
+        description: 'Skip build and use a prebuilt artifact.'
+        required: false
+        default: false
+        type: boolean
+      build_artifact_name:
+        description: 'Artifact name that contains the prebuilt build output.'
+        required: false
+        default: ''
         type: string
       build_dir:
-        description: "Build output directory (relative to caller repo)."
+        description: 'Build output directory (relative to caller repo).'
         required: false
-        default: "out"
+        default: 'out'
         type: string
       caller_repository:
-        description: "Optional: repository to deploy (owner/repo). Defaults to the caller."
+        description: 'Optional: repository to deploy (owner/repo). Defaults to the caller.'
         required: false
         type: string
       caller_ref:
-        description: "Optional: git ref (sha/branch/tag) to deploy. Defaults to the caller ref."
+        description: 'Optional: git ref (sha/branch/tag) to deploy. Defaults to the caller ref.'
         required: false
         type: string
       pinata_action_repository:
-        description: "Repo to use for pinata action (owner/repo)."
+        description: 'Repo to use for pinata action (owner/repo).'
         required: false
-        default: "gnosis/gh-action-pinata"
+        default: 'gnosis/gh-action-pinata'
         type: string
       pinata_action_ref:
         description: "Git ref (branch/tag) to use for pinata action repo. Defaults to 'main'."
         required: false
-        default: "main"
+        default: 'main'
         type: string
     secrets:
       PINATA_JWT:
         required: true
       PINATA_ACTION_TOKEN:
-        description: "Optional token to checkout the pinata action repo."
+        description: 'Optional token to checkout the pinata action repo.'
         required: false
     outputs:
       ipfs_hash:
-        description: "Deployed IPFS hash."
+        description: 'Deployed IPFS hash.'
         value: ${{ jobs.deploy.outputs.ipfs_hash }}
       pinata_url:
-        description: "Pinata gateway URL for the deployed hash."
+        description: 'Pinata gateway URL for the deployed hash.'
         value: ${{ jobs.deploy.outputs.pinata_url }}
 
 jobs:
@@ -88,6 +98,7 @@ jobs:
       pinata_url: ${{ steps.deployment.outputs.pinata_url }}
     steps:
       - name: Checkout caller repo
+        if: ${{ !inputs.use_prebuilt_build }}
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ inputs.caller_repository || github.repository }}
@@ -135,18 +146,18 @@ jobs:
             echo "❌ Error: pinata_upload_timeout_ms must be >= 10000"
             exit 1
           fi
-          
+
           # Validate project_name
           PROJECT_NAME="${{ inputs.project_name }}"
           if [ -z "$PROJECT_NAME" ]; then
             echo "❌ Error: project_name cannot be empty"
             exit 1
           fi
-          
+
           if echo "$PROJECT_NAME" | grep -qE '[^[:alnum:]-_]'; then
             echo "⚠️  Warning: project_name contains special characters, will be sanitized"
           fi
-          
+
           # Validate build_dir
           BUILD_DIR="${{ inputs.build_dir }}"
           if [ -z "$BUILD_DIR" ]; then
@@ -157,44 +168,56 @@ jobs:
             echo "❌ Error: build_dir cannot contain '..' or be an absolute path, got: $BUILD_DIR"
             exit 1
           fi
-          
+
           # Validate install_command
-          INSTALL_CMD="${{ inputs.install_command }}"
-          if [ -z "$INSTALL_CMD" ]; then
-            echo "❌ Error: install_command cannot be empty"
-            exit 1
+          if [ "${{ inputs.use_prebuilt_build }}" = "false" ]; then
+            INSTALL_CMD="${{ inputs.install_command }}"
+            if [ -z "$INSTALL_CMD" ]; then
+              echo "❌ Error: install_command cannot be empty"
+              exit 1
+            fi
+            if echo "$INSTALL_CMD" | grep -qE '[;&|<>`$()]'; then
+              echo "❌ Error: install_command contains potentially dangerous characters"
+              exit 1
+            fi
           fi
-          if echo "$INSTALL_CMD" | grep -qE '[;&|<>`$()]'; then
-            echo "❌ Error: install_command contains potentially dangerous characters"
-            exit 1
-          fi
-          
+
           # Validate build_command
-          BUILD_CMD="${{ inputs.build_command }}"
-          if [ -z "$BUILD_CMD" ]; then
-            echo "❌ Error: build_command cannot be empty"
-            exit 1
+          if [ "${{ inputs.use_prebuilt_build }}" = "false" ]; then
+            BUILD_CMD="${{ inputs.build_command }}"
+            if [ -z "$BUILD_CMD" ]; then
+              echo "❌ Error: build_command cannot be empty"
+              exit 1
+            fi
+            if echo "$BUILD_CMD" | grep -qE '[;&|<>`$()]'; then
+              echo "❌ Error: build_command contains potentially dangerous characters"
+              exit 1
+            fi
           fi
-          if echo "$BUILD_CMD" | grep -qE '[;&|<>`$()]'; then
-            echo "❌ Error: build_command contains potentially dangerous characters"
-            exit 1
-          fi
-          
+
           # Validate build_env keys (if provided)
-          BUILD_ENV="${{ inputs.build_env }}"
-          if [ -n "$BUILD_ENV" ]; then
-            while IFS= read -r line; do
-              [ -z "$line" ] && continue
-              KEY="${line%%=*}"
-              if ! echo "$KEY" | grep -qE '^[A-Z0-9_]+$'; then
-                echo "❌ Error: build_env key must be [A-Z0-9_]+, got: $KEY"
-                exit 1
-              fi
-            done << 'EOF'
-          ${{ inputs.build_env }}
-          EOF
+          if [ "${{ inputs.use_prebuilt_build }}" = "false" ]; then
+            BUILD_ENV="${{ inputs.build_env }}"
+            if [ -n "$BUILD_ENV" ]; then
+              while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                KEY="${line%%=*}"
+                if ! echo "$KEY" | grep -qE '^[A-Z0-9_]+$'; then
+                  echo "❌ Error: build_env key must be [A-Z0-9_]+, got: $KEY"
+                  exit 1
+                fi
+              done << 'EOF'
+            ${{ inputs.build_env }}
+            EOF
+            fi
           fi
-          
+
+          # Validate build artifact name
+          if [ "${{ inputs.use_prebuilt_build }}" = "true" ] && [ -z "${{ inputs.build_artifact_name }}" ]; then
+            echo "❌ Error: build_artifact_name is required when use_prebuilt_build is true"
+            exit 1
+          fi
+
           # Validate caller_repository format (owner/repo)
           if [ -n "${{ inputs.caller_repository }}" ]; then
             CALLER_REPO="${{ inputs.caller_repository }}"
@@ -203,7 +226,7 @@ jobs:
               exit 1
             fi
           fi
-          
+
           # Validate caller_ref
           if [ -n "${{ inputs.caller_ref }}" ]; then
             CALLER_REF="${{ inputs.caller_ref }}"
@@ -212,7 +235,7 @@ jobs:
               exit 1
             fi
           fi
-          
+
           # Validate pinata_action_ref
           PINATA_REF="${{ inputs.pinata_action_ref }}"
           if [ -z "$PINATA_REF" ]; then
@@ -223,7 +246,7 @@ jobs:
             echo "❌ Error: pinata_action_ref contains potentially dangerous characters"
             exit 1
           fi
-          
+
           # Validate pinata_action_repository format (owner/repo)
           PINATA_REPO="${{ inputs.pinata_action_repository }}"
           if [ -z "$PINATA_REPO" ]; then
@@ -234,10 +257,11 @@ jobs:
             echo "❌ Error: pinata_action_repository must be in format 'owner/repo', got: $PINATA_REPO"
             exit 1
           fi
-          
+
           echo "✅ Input validation passed"
 
       - name: Install caller dependencies
+        if: ${{ !inputs.use_prebuilt_build }}
         timeout-minutes: 10
         working-directory: caller
         shell: bash
@@ -245,7 +269,7 @@ jobs:
           ${{ inputs.install_command }}
 
       - name: Set build environment variables
-        if: ${{ inputs.build_env != '' }}
+        if: ${{ !inputs.use_prebuilt_build && inputs.build_env != '' }}
         run: |
           while IFS= read -r line; do
             [ -z "$line" ] && continue
@@ -257,11 +281,19 @@ jobs:
           EOF
 
       - name: Build caller repo
+        if: ${{ !inputs.use_prebuilt_build }}
         timeout-minutes: 30
         working-directory: caller
         shell: bash
         run: |
           ${{ inputs.build_command }}
+
+      - name: Download prebuilt artifact
+        if: ${{ inputs.use_prebuilt_build }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.build_artifact_name }}
+          path: caller/${{ inputs.build_dir }}
 
       - name: Validate build output
         run: |
@@ -270,13 +302,13 @@ jobs:
             echo "❌ Error: Build directory '$BUILD_DIR' not found after build"
             exit 1
           fi
-          
+
           FILE_COUNT=$(find "$BUILD_DIR" -type f | wc -l)
           if [ "$FILE_COUNT" -eq 0 ]; then
             echo "❌ Error: Build directory '$BUILD_DIR' is empty"
             exit 1
           fi
-          
+
           echo "✅ Build output validated: $FILE_COUNT files found"
 
       - name: Install pinata uploader dependencies
@@ -321,24 +353,24 @@ jobs:
             echo "❌ Deployment info not found at $FILE"
             exit 1
           fi
-          
+
           # Validate JSON file
           if ! jq empty "$FILE" 2>/dev/null; then
             echo "❌ Invalid JSON in deployment file: $FILE"
             exit 1
           fi
-          
+
           IPFS_HASH=$(jq -r '.ipfs_hash' "$FILE")
-          
+
           if [ -z "$IPFS_HASH" ] || [ "$IPFS_HASH" = "null" ]; then
             echo "❌ Invalid or missing IPFS hash in deployment file"
             exit 1
           fi
-          
+
           PINATA_URL="https://gateway.pinata.cloud/ipfs/$IPFS_HASH"
           echo "ipfs_hash=$IPFS_HASH" >> "$GITHUB_OUTPUT"
           echo "pinata_url=$PINATA_URL" >> "$GITHUB_OUTPUT"
-          
+
           echo "✅ Deployment info extracted successfully"
 
       - name: Upload deployment artifacts
@@ -357,10 +389,9 @@ jobs:
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" << EOF
           ## ✅ Pinata IPFS Deployment Complete
-          
+
           - **Environment**: \`${{ inputs.environment }}\`
           - **Project**: \`${{ inputs.project_name }}\`
           - **IPFS Hash**: \`${{ steps.deployment.outputs.ipfs_hash }}\`
           - **Pinata URL**: [${{ steps.deployment.outputs.pinata_url }}](${{ steps.deployment.outputs.pinata_url }})
           EOF
-
