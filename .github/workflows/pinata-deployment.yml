@@ -36,6 +36,11 @@ on:
         required: false
         default: "npm run build"
         type: string
+      build_env:
+        description: "Optional newline-separated KEY=VALUE envs for build."
+        required: false
+        default: ""
+        type: string
       build_dir:
         description: "Build output directory (relative to caller repo)."
         required: false
@@ -175,6 +180,21 @@ jobs:
             exit 1
           fi
           
+          # Validate build_env keys (if provided)
+          BUILD_ENV="${{ inputs.build_env }}"
+          if [ -n "$BUILD_ENV" ]; then
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              KEY="${line%%=*}"
+              if ! echo "$KEY" | grep -qE '^[A-Z0-9_]+$'; then
+                echo "❌ Error: build_env key must be [A-Z0-9_]+, got: $KEY"
+                exit 1
+              fi
+            done << 'EOF'
+          ${{ inputs.build_env }}
+          EOF
+          fi
+          
           # Validate caller_repository format (owner/repo)
           if [ -n "${{ inputs.caller_repository }}" ]; then
             CALLER_REPO="${{ inputs.caller_repository }}"
@@ -223,6 +243,18 @@ jobs:
         shell: bash
         run: |
           ${{ inputs.install_command }}
+
+      - name: Set build environment variables
+        if: ${{ inputs.build_env != '' }}
+        run: |
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            KEY="${line%%=*}"
+            VALUE="${line#*=}"
+            printf '%s=%s\n' "$KEY" "$VALUE" >> "$GITHUB_ENV"
+          done << 'EOF'
+          ${{ inputs.build_env }}
+          EOF
 
       - name: Build caller repo
         timeout-minutes: 30
