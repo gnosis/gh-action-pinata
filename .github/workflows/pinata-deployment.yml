@@ -49,6 +49,11 @@ on:
         description: "Optional: git ref (sha/branch/tag) to deploy. Defaults to the caller ref."
         required: false
         type: string
+      pinata_action_repository:
+        description: "Repo to use for pinata action (owner/repo)."
+        required: false
+        default: "gnosis/gh-action-pinata"
+        type: string
       pinata_action_ref:
         description: "Git ref (branch/tag) to use for pinata action repo. Defaults to 'main'."
         required: false
@@ -57,6 +62,9 @@ on:
     secrets:
       PINATA_JWT:
         required: true
+      PINATA_ACTION_TOKEN:
+        description: "Optional token to checkout the pinata action repo."
+        required: false
     outputs:
       ipfs_hash:
         description: "Deployed IPFS hash."
@@ -85,10 +93,11 @@ jobs:
       - name: Checkout pinata deploy action repo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: gnosis/gh-action-pinata
+          repository: ${{ inputs.pinata_action_repository }}
           ref: ${{ inputs.pinata_action_ref }}
           fetch-depth: 1
           path: pinata
+          token: ${{ secrets.PINATA_ACTION_TOKEN || github.token }}
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -192,6 +201,17 @@ jobs:
           fi
           if echo "$PINATA_REF" | grep -qE '[;&|<>`$()]'; then
             echo "❌ Error: pinata_action_ref contains potentially dangerous characters"
+            exit 1
+          fi
+          
+          # Validate pinata_action_repository format (owner/repo)
+          PINATA_REPO="${{ inputs.pinata_action_repository }}"
+          if [ -z "$PINATA_REPO" ]; then
+            echo "❌ Error: pinata_action_repository cannot be empty"
+            exit 1
+          fi
+          if ! echo "$PINATA_REPO" | grep -qE '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$'; then
+            echo "❌ Error: pinata_action_repository must be in format 'owner/repo', got: $PINATA_REPO"
             exit 1
           fi
           
