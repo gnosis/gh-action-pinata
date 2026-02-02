@@ -171,8 +171,17 @@ jobs:
                   
                   pm_field = data.get("packageManager", "")
                   if pm_field:
-                      # Check if format is valid (should be like "yarn@1.22.0" or "pnpm@9.0.0")
-                      if not re.match(r'^(npm|pnpm|yarn)@\d+\.\d+', pm_field):
+                      # Check for the specific malformed pattern "yarn@pnpm@" or any invalid format
+                      # Valid format: "yarn@1.22.22" or "pnpm@9.0.0" (must match: pm@version)
+                      is_malformed = False
+                      
+                      # Check for obvious malformed patterns
+                      if "@" in pm_field.replace("@", "", 1):  # More than one @
+                          is_malformed = True
+                      elif not re.match(r'^(npm|pnpm|yarn)@\d+\.\d+', pm_field):
+                          is_malformed = True
+                      
+                      if is_malformed:
                           print(f"⚠️  Warning: Malformed packageManager field in {pkg_file}: {pm_field}", file=sys.stderr)
                           print(f"⚠️  Temporarily removing it to prevent yarn/pnpm failures", file=sys.stderr)
                           # Remove the malformed field
@@ -190,12 +199,22 @@ jobs:
           fixed_any = False
           
           # Check workspace root (where setup-node runs from)
+          print(f"Checking workspace root package.json...", file=sys.stderr)
           if check_and_fix_package_json("package.json"):
               fixed_any = True
           
-          # Check caller directory (if it exists)
+          # Check caller directory (if it exists - only when use_prebuilt_build is false)
           if os.path.exists("caller/package.json"):
+              print(f"Checking caller/package.json...", file=sys.stderr)
               if check_and_fix_package_json("caller/package.json"):
+                  fixed_any = True
+          else:
+              print(f"caller/package.json not found (use_prebuilt_build may be true)", file=sys.stderr)
+          
+          # Also check pinata directory (just in case)
+          if os.path.exists("pinata/package.json"):
+              print(f"Checking pinata/package.json...", file=sys.stderr)
+              if check_and_fix_package_json("pinata/package.json"):
                   fixed_any = True
           
           if not fixed_any:
