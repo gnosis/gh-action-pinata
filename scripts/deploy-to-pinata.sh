@@ -125,14 +125,25 @@ fi
 # Run upload script and capture both stdout and stderr
 # Use a temporary file to capture output since command substitution might hide errors
 UPLOAD_OUTPUT_FILE=$(mktemp)
-if ! node "$UPLOAD_SCRIPT" "$TEMP_DIR" "${PROJECT_NAME}-${ENVIRONMENT}-${TIMESTAMP}" > "$UPLOAD_OUTPUT_FILE" 2>&1; then
-  UPLOAD_EXIT_CODE=$?
+node "$UPLOAD_SCRIPT" "$TEMP_DIR" "${PROJECT_NAME}-${ENVIRONMENT}-${TIMESTAMP}" > "$UPLOAD_OUTPUT_FILE" 2>&1
+UPLOAD_EXIT_CODE=$?
+
+if [ $UPLOAD_EXIT_CODE -ne 0 ]; then
   echo -e "${RED}❌ Failed to upload to Pinata (exit code: $UPLOAD_EXIT_CODE)${NC}"
   echo ""
   echo "=== Upload script output (last 30 lines) ==="
   # Filter out sensitive info but show errors
   grep -v -i -E '(jwt|token|secret|password|auth|bearer)' "$UPLOAD_OUTPUT_FILE" | tail -n 30 || cat "$UPLOAD_OUTPUT_FILE" | tail -n 30
   echo "=== End of upload script output ==="
+  
+  # Check for specific error types and provide helpful messages
+  if grep -q "NO_SCOPES_FOUND\|403 Forbidden" "$UPLOAD_OUTPUT_FILE"; then
+    echo ""
+    echo -e "${YELLOW}💡 Tip: Your PINATA_JWT token is missing required scopes.${NC}"
+    echo -e "${YELLOW}   Please ensure your Pinata API key has the 'pinFileToIPFS' scope enabled.${NC}"
+    echo -e "${YELLOW}   Check your Pinata dashboard: https://app.pinata.cloud/developers/api-keys${NC}"
+  fi
+  
   rm -f "$UPLOAD_OUTPUT_FILE"
   exit 1
 fi
