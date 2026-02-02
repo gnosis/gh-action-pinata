@@ -115,11 +115,45 @@ jobs:
           path: pinata
           token: ${{ secrets.PINATA_ACTION_TOKEN || github.token }}
 
+      - name: Disable corepack to avoid conflicts
+        run: |
+          # Disable corepack initially to avoid conflicts with caller repo's packageManager field
+          # Some repos may have malformed packageManager fields that would cause corepack to fail
+          # We'll enable it later only for the pinata repo
+          if command -v corepack >/dev/null 2>&1; then
+            corepack disable 2>/dev/null || true
+            echo "✅ Corepack disabled to prevent conflicts with caller repo"
+          fi
+
+      - name: Detect caller package manager and prepare environment
+        if: ${{ !inputs.use_prebuilt_build }}
+        id: detect_pm
+        run: |
+          cd caller
+          if [ -f "package-lock.json" ]; then
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+            echo "lockfile=package-lock.json" >> "$GITHUB_OUTPUT"
+            echo "default_install=npm ci" >> "$GITHUB_OUTPUT"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+            echo "lockfile=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
+            echo "default_install=pnpm install --frozen-lockfile" >> "$GITHUB_OUTPUT"
+          elif [ -f "yarn.lock" ]; then
+            echo "pm=yarn" >> "$GITHUB_OUTPUT"
+            echo "lockfile=yarn.lock" >> "$GITHUB_OUTPUT"
+            echo "default_install=yarn install --frozen-lockfile" >> "$GITHUB_OUTPUT"
+          else
+            # Default to npm if no lockfile found
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+            echo "lockfile=" >> "$GITHUB_OUTPUT"
+            echo "default_install=npm ci" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Detected package manager: $(cat "$GITHUB_OUTPUT" | grep "^pm=" | cut -d= -f2)"
+
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ inputs.node_version }}
-
           cache: ${{ inputs.cache }}
           cache-dependency-path: |
             caller/package-lock.json
@@ -136,8 +170,9 @@ jobs:
           fi
 
           # Validate cache manager
-          if [ "${{ inputs.cache }}" != "npm" ] && [ "${{ inputs.cache }}" != "pnpm" ] && [ "${{ inputs.cache }}" != "yarn" ]; then
-            echo "❌ Error: cache must be one of: npm|pnpm|yarn, got: ${{ inputs.cache }}"
+          CACHE_MANAGER="${{ inputs.cache }}"
+          if [ "$CACHE_MANAGER" != "npm" ] && [ "$CACHE_MANAGER" != "pnpm" ] && [ "$CACHE_MANAGER" != "yarn" ]; then
+            echo "❌ Error: cache must be one of: npm|pnpm|yarn, got: $CACHE_MANAGER"
             exit 1
           fi
 
@@ -264,7 +299,21 @@ jobs:
         working-directory: caller
         shell: bash
         run: |
-          ${{ inputs.install_command }}
+          # Ensure corepack remains disabled to avoid conflicts with caller repo's packageManager field
+          # Some repos may have malformed packageManager fields that would cause corepack to fail
+          if command -v corepack >/dev/null 2>&1; then
+            corepack disable 2>/dev/null || true
+          fi
+          
+          # Use detected default install command if install_command is the default value
+          INSTALL_CMD="${{ inputs.install_command }}"
+          if [ "$INSTALL_CMD" = "npm ci" ] && [ -n "${{ steps.detect_pm.outputs.default_install }}" ]; then
+            INSTALL_CMD="${{ steps.detect_pm.outputs.default_install }}"
+            echo "Using auto-detected install command: $INSTALL_CMD"
+          fi
+          
+          # Run the install command
+          $INSTALL_CMD
 
       - name: Set build environment variables
         if: ${{ !inputs.use_prebuilt_build && inputs.build_env != '' }}
@@ -310,9 +359,33 @@ jobs:
       - name: Install pinata uploader dependencies
         timeout-minutes: 5
         working-directory: pinata
+        shell: bash
         run: |
+          # Validate pinata package.json has a valid packageManager field before enabling corepack
+          if [ -f "package.json" ]; then
+            if command -v jq >/dev/null 2>&1; then
+              PM_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null || echo "")
+              if [ -n "$PM_FIELD" ] && [ "$PM_FIELD" != "null" ]; then
+                # Validate format: should be like "pnpm@9.0.0" or "npm@10.0.0" etc
+                if ! echo "$PM_FIELD" | grep -qE '^(npm|pnpm|yarn)@[0-9]+\.[0-9]+\.[0-9]+'; then
+                  echo "⚠️  Warning: Invalid packageManager format in pinata/package.json: $PM_FIELD"
+                  echo "⚠️  Expected format: 'pnpm@9.0.0' or 'npm@10.0.0'"
+                else
+                  echo "✅ Valid packageManager field found: $PM_FIELD"
+                fi
+              fi
+            fi
+          fi
+          
+          # Enable corepack - this enables it globally but we're in the pinata directory
+          # Corepack will use the packageManager field from the current directory's package.json
+          # when resolving package managers
           corepack enable
+          
+          # Verify pnpm is available
           pnpm --version
+          
+          # Install dependencies for pinata uploader
           pnpm install --frozen-lockfile
 
       - name: Install jq/curl
