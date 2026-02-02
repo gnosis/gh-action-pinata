@@ -141,27 +141,18 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
 
-      - name: Disable corepack (prevent packageManager conflicts)
-        run: |
-          # Disable corepack BEFORE installing/using yarn/pnpm
-          # This prevents corepack from enforcing packageManager fields
-          # We'll enable it later only for the pinata repo
-          if command -v corepack >/dev/null 2>&1; then
-            corepack disable 2>/dev/null || true
-            echo "✅ Corepack disabled to prevent conflicts"
-          fi
-
-      - name: Check and fix malformed packageManager fields
+      - name: Remove packageManager fields (prevent Corepack conflicts)
         if: ${{ inputs.cache == 'yarn' || inputs.cache == 'pnpm' }}
-        id: fix_pm
         run: |
+          # Remove ALL packageManager fields to prevent Corepack from interfering
+          # We manage package managers manually via npm install -g, so we don't need these fields
+          # This prevents yarn/pnpm from checking packageManager fields and failing
           python3 << 'PYTHON_SCRIPT'
           import json
           import sys
-          import re
           import os
           
-          def check_and_fix_package_json(pkg_file):
+          def remove_package_manager_field(pkg_file):
               if not os.path.exists(pkg_file):
                   return False
               
@@ -169,60 +160,41 @@ jobs:
                   with open(pkg_file, "r") as f:
                       data = json.load(f)
                   
-                  pm_field = data.get("packageManager", "")
-                  if pm_field:
-                      # Check for the specific malformed pattern "yarn@pnpm@" or any invalid format
-                      # Valid format: "yarn@1.22.22" or "pnpm@9.0.0" (must match: pm@version)
-                      is_malformed = False
-                      
-                      # Check for obvious malformed patterns
-                      if "@" in pm_field.replace("@", "", 1):  # More than one @
-                          is_malformed = True
-                      elif not re.match(r'^(npm|pnpm|yarn)@\d+\.\d+', pm_field):
-                          is_malformed = True
-                      
-                      if is_malformed:
-                          print(f"⚠️  Warning: Malformed packageManager field in {pkg_file}: {pm_field}", file=sys.stderr)
-                          print(f"⚠️  Temporarily removing it to prevent yarn/pnpm failures", file=sys.stderr)
-                          # Remove the malformed field
-                          del data["packageManager"]
-                          with open(pkg_file, "w") as f:
-                              json.dump(data, f, indent=2)
-                              f.write("\n")
-                          print(f"✅ Temporarily removed malformed packageManager field from {pkg_file}", file=sys.stderr)
-                          return True
+                  if "packageManager" in data:
+                      pm_field = data["packageManager"]
+                      print(f"⚠️  Removing packageManager field from {pkg_file}: {pm_field}", file=sys.stderr)
+                      del data["packageManager"]
+                      with open(pkg_file, "w") as f:
+                          json.dump(data, f, indent=2)
+                          f.write("\n")
+                      print(f"✅ Removed packageManager field from {pkg_file}", file=sys.stderr)
+                      return True
               except Exception as e:
                   print(f"⚠️  Error processing {pkg_file}: {e}", file=sys.stderr)
               
               return False
           
-          fixed_any = False
+          removed_any = False
           
           # Check workspace root (where setup-node runs from)
-          print(f"Checking workspace root package.json...", file=sys.stderr)
-          if check_and_fix_package_json("package.json"):
-              fixed_any = True
+          if remove_package_manager_field("package.json"):
+              removed_any = True
           
-          # Check caller directory (if it exists - only when use_prebuilt_build is false)
+          # Check caller directory (if it exists)
           if os.path.exists("caller/package.json"):
-              print(f"Checking caller/package.json...", file=sys.stderr)
-              if check_and_fix_package_json("caller/package.json"):
-                  fixed_any = True
-          else:
-              print(f"caller/package.json not found (use_prebuilt_build may be true)", file=sys.stderr)
+              if remove_package_manager_field("caller/package.json"):
+                  removed_any = True
           
-          # Also check pinata directory (just in case)
+          # Check pinata directory (we'll handle pnpm installation manually)
           if os.path.exists("pinata/package.json"):
-              print(f"Checking pinata/package.json...", file=sys.stderr)
-              if check_and_fix_package_json("pinata/package.json"):
-                  fixed_any = True
+              if remove_package_manager_field("pinata/package.json"):
+                  removed_any = True
           
-          if not fixed_any:
-              print("✅ No malformed packageManager fields found")
+          if not removed_any:
+              print("✅ No packageManager fields found (or already removed)")
           else:
-              print("✅ Fixed malformed packageManager fields")
+              print("✅ Removed packageManager fields to prevent Corepack conflicts")
           
-          # Always exit with success (0) - finding no malformed fields is also success
           sys.exit(0)
           PYTHON_SCRIPT
 
@@ -230,7 +202,7 @@ jobs:
         run: |
           # Install yarn/pnpm if cache is set to them
           # setup-node requires the package manager to be available for caching
-          # We install directly via npm to avoid corepack enforcement conflicts
+          # We install directly via npm (no Corepack needed)
           CACHE_MANAGER="${{ inputs.cache }}"
           if [ "$CACHE_MANAGER" = "yarn" ]; then
             if ! command -v yarn >/dev/null 2>&1; then
@@ -402,22 +374,6 @@ jobs:
         working-directory: caller
         shell: bash
         run: |
-          # Check if caller repo has a malformed packageManager field that would break corepack
-          # If so, disable corepack temporarily for this step
-          if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
-            PM_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null || echo "")
-            if [ -n "$PM_FIELD" ] && [ "$PM_FIELD" != "null" ]; then
-              # Check if format is valid (should be like "yarn@1.22.0" or "pnpm@9.0.0")
-              if ! echo "$PM_FIELD" | grep -qE '^(npm|pnpm|yarn)@[0-9]+\.[0-9]+'; then
-                echo "⚠️  Warning: Malformed packageManager field detected: $PM_FIELD"
-                echo "⚠️  Temporarily disabling corepack to avoid conflicts"
-                if command -v corepack >/dev/null 2>&1; then
-                  corepack disable 2>/dev/null || true
-                fi
-              fi
-            fi
-          fi
-          
           # Use detected default install command if install_command is the default value
           INSTALL_CMD="${{ inputs.install_command }}"
           if [ "$INSTALL_CMD" = "npm ci" ] && [ -n "${{ steps.detect_pm.outputs.default_install }}" ]; then
@@ -474,26 +430,14 @@ jobs:
         working-directory: pinata
         shell: bash
         run: |
-          # Validate pinata package.json has a valid packageManager field before enabling corepack
-          if [ -f "package.json" ]; then
-            if command -v jq >/dev/null 2>&1; then
-              PM_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null || echo "")
-              if [ -n "$PM_FIELD" ] && [ "$PM_FIELD" != "null" ]; then
-                # Validate format: should be like "pnpm@9.0.0" or "npm@10.0.0" etc
-                if ! echo "$PM_FIELD" | grep -qE '^(npm|pnpm|yarn)@[0-9]+\.[0-9]+\.[0-9]+'; then
-                  echo "⚠️  Warning: Invalid packageManager format in pinata/package.json: $PM_FIELD"
-                  echo "⚠️  Expected format: 'pnpm@9.0.0' or 'npm@10.0.0'"
-                else
-                  echo "✅ Valid packageManager field found: $PM_FIELD"
-                fi
-              fi
-            fi
+          # Install pnpm via npm (no Corepack needed)
+          if ! command -v pnpm >/dev/null 2>&1; then
+            echo "Installing pnpm via npm..."
+            npm install -g pnpm
+            echo "✅ pnpm installed"
+          else
+            echo "✅ pnpm already available"
           fi
-          
-          # Enable corepack - this enables it globally but we're in the pinata directory
-          # Corepack will use the packageManager field from the current directory's package.json
-          # when resolving package managers
-          corepack enable
           
           # Verify pnpm is available
           pnpm --version
