@@ -136,6 +136,11 @@ jobs:
           fi
           echo "Detected package manager: $(cat "$GITHUB_OUTPUT" | grep "^pm=" | cut -d= -f2)"
 
+      - name: Setup Node.js (without cache)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
       - name: Install package manager for caching (if needed)
         run: |
           # Install yarn/pnpm if cache is set to them
@@ -150,6 +155,7 @@ jobs:
             else
               echo "✅ Yarn already available"
             fi
+            yarn --version
           elif [ "$CACHE_MANAGER" = "pnpm" ]; then
             if ! command -v pnpm >/dev/null 2>&1; then
               echo "Installing pnpm via npm..."
@@ -158,6 +164,7 @@ jobs:
             else
               echo "✅ pnpm already available"
             fi
+            pnpm --version
           fi
           
           # Disable corepack to prevent it from enforcing packageManager fields
@@ -167,7 +174,7 @@ jobs:
             echo "✅ Corepack disabled to prevent conflicts"
           fi
 
-      - name: Setup Node.js
+      - name: Setup Node.js cache
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ inputs.node_version }}
