@@ -77,9 +77,6 @@ on:
     secrets:
       PINATA_JWT:
         required: true
-      PINATA_ACTION_TOKEN:
-        description: 'Optional token to checkout the pinata action repo.'
-        required: false
     outputs:
       ipfs_hash:
         description: 'Deployed IPFS hash.'
@@ -113,7 +110,6 @@ jobs:
           ref: ${{ inputs.pinata_action_ref }}
           fetch-depth: 1
           path: pinata
-          token: ${{ secrets.PINATA_ACTION_TOKEN || github.token }}
 
       - name: Disable corepack to avoid conflicts
         run: |
