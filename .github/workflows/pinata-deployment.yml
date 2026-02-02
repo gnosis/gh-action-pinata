@@ -136,26 +136,35 @@ jobs:
           fi
           echo "Detected package manager: $(cat "$GITHUB_OUTPUT" | grep "^pm=" | cut -d= -f2)"
 
-      - name: Enable corepack for package manager (if needed)
+      - name: Install package manager for caching (if needed)
         run: |
-          # Enable corepack if cache is set to yarn or pnpm
+          # Install yarn/pnpm if cache is set to them
           # setup-node requires the package manager to be available for caching
+          # We install directly via npm to avoid corepack enforcement conflicts
           CACHE_MANAGER="${{ inputs.cache }}"
-          if [ "$CACHE_MANAGER" = "yarn" ] || [ "$CACHE_MANAGER" = "pnpm" ]; then
-            if command -v corepack >/dev/null 2>&1; then
-              # Enable corepack to make yarn/pnpm available
-              # We'll disable it later before working with caller repo if needed
-              corepack enable
-              echo "✅ Corepack enabled for $CACHE_MANAGER"
+          if [ "$CACHE_MANAGER" = "yarn" ]; then
+            if ! command -v yarn >/dev/null 2>&1; then
+              echo "Installing yarn via npm..."
+              npm install -g yarn
+              echo "✅ Yarn installed"
             else
-              echo "⚠️  Warning: corepack not available, $CACHE_MANAGER may not work"
+              echo "✅ Yarn already available"
             fi
-          else
-            # For npm, corepack is not needed
-            if command -v corepack >/dev/null 2>&1; then
-              corepack disable 2>/dev/null || true
-              echo "✅ Corepack disabled (using npm)"
+          elif [ "$CACHE_MANAGER" = "pnpm" ]; then
+            if ! command -v pnpm >/dev/null 2>&1; then
+              echo "Installing pnpm via npm..."
+              npm install -g pnpm
+              echo "✅ pnpm installed"
+            else
+              echo "✅ pnpm already available"
             fi
+          fi
+          
+          # Disable corepack to prevent it from enforcing packageManager fields
+          # We'll enable it later only for the pinata repo
+          if command -v corepack >/dev/null 2>&1; then
+            corepack disable 2>/dev/null || true
+            echo "✅ Corepack disabled to prevent conflicts"
           fi
 
       - name: Setup Node.js
