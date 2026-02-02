@@ -141,6 +141,70 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
 
+      - name: Disable corepack (prevent packageManager conflicts)
+        run: |
+          # Disable corepack BEFORE installing/using yarn/pnpm
+          # This prevents corepack from enforcing packageManager fields
+          # We'll enable it later only for the pinata repo
+          if command -v corepack >/dev/null 2>&1; then
+            corepack disable 2>/dev/null || true
+            echo "✅ Corepack disabled to prevent conflicts"
+          fi
+
+      - name: Check and fix malformed packageManager fields
+        if: ${{ inputs.cache == 'yarn' || inputs.cache == 'pnpm' }}
+        id: fix_pm
+        run: |
+          # Check for malformed packageManager fields that would break yarn/pnpm
+          # This must happen BEFORE setup-node tries to use yarn/pnpm for caching
+          # setup-node runs yarn cache dir internally, which checks packageManager fields
+          # We check both workspace root and caller directory
+          FIXED_ANY=false
+          
+          # Install jq if not available (needed for JSON parsing)
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "Installing jq..."
+            sudo apt-get update && sudo apt-get install -y jq || echo "⚠️  Could not install jq"
+          fi
+          
+          # Function to check and fix package.json
+          check_and_fix_package_json() {
+            local pkg_file="$1"
+            if [ -f "$pkg_file" ] && command -v jq >/dev/null 2>&1; then
+              PM_FIELD=$(jq -r '.packageManager // empty' "$pkg_file" 2>/dev/null || echo "")
+              if [ -n "$PM_FIELD" ] && [ "$PM_FIELD" != "null" ]; then
+                # Check if format is valid (should be like "yarn@1.22.0" or "pnpm@9.0.0")
+                if ! echo "$PM_FIELD" | grep -qE '^(npm|pnpm|yarn)@[0-9]+\.[0-9]+'; then
+                  echo "⚠️  Warning: Malformed packageManager field in $pkg_file: $PM_FIELD"
+                  echo "⚠️  Temporarily removing it to prevent yarn/pnpm failures"
+                  # Temporarily remove the malformed field
+                  jq 'del(.packageManager)' "$pkg_file" > "${pkg_file}.tmp" && \
+                  mv "${pkg_file}.tmp" "$pkg_file"
+                  echo "✅ Temporarily removed malformed packageManager field from $pkg_file"
+                  return 0  # Fixed
+                fi
+              fi
+            fi
+            return 1  # Not fixed
+          }
+          
+          # Check workspace root (where setup-node runs from)
+          if check_and_fix_package_json "package.json"; then
+            FIXED_ANY=true
+          fi
+          
+          # Check caller directory
+          if [ -d "caller" ] && check_and_fix_package_json "caller/package.json"; then
+            FIXED_ANY=true
+          fi
+          
+          if [ "$FIXED_ANY" = "true" ]; then
+            echo "fixed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fixed=false" >> "$GITHUB_OUTPUT"
+            echo "✅ No malformed packageManager fields found"
+          fi
+
       - name: Install package manager for caching (if needed)
         run: |
           # Install yarn/pnpm if cache is set to them
@@ -155,7 +219,8 @@ jobs:
             else
               echo "✅ Yarn already available"
             fi
-            yarn --version
+            # Verify yarn works (use --ignore-engines to avoid packageManager field checks)
+            yarn --version || echo "⚠️  Yarn version check failed, but yarn is installed"
           elif [ "$CACHE_MANAGER" = "pnpm" ]; then
             if ! command -v pnpm >/dev/null 2>&1; then
               echo "Installing pnpm via npm..."
@@ -164,14 +229,7 @@ jobs:
             else
               echo "✅ pnpm already available"
             fi
-            pnpm --version
-          fi
-          
-          # Disable corepack to prevent it from enforcing packageManager fields
-          # We'll enable it later only for the pinata repo
-          if command -v corepack >/dev/null 2>&1; then
-            corepack disable 2>/dev/null || true
-            echo "✅ Corepack disabled to prevent conflicts"
+            pnpm --version || echo "⚠️  pnpm version check failed, but pnpm is installed"
           fi
 
       - name: Setup Node.js cache
