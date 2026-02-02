@@ -123,25 +123,42 @@ if [ ! -f "$UPLOAD_SCRIPT" ]; then
 fi
 
 # Run upload script and capture both stdout and stderr
-# Use a temporary file to capture output since command substitution might hide errors
+# Temporarily disable exit on error to capture the exit code properly
+set +e
 UPLOAD_OUTPUT_FILE=$(mktemp)
 node "$UPLOAD_SCRIPT" "$TEMP_DIR" "${PROJECT_NAME}-${ENVIRONMENT}-${TIMESTAMP}" > "$UPLOAD_OUTPUT_FILE" 2>&1
 UPLOAD_EXIT_CODE=$?
+set -euo pipefail
+
+# Always show the full output for debugging (filter sensitive info)
+echo ""
+echo "=== Upload script output ==="
+# Show output but filter sensitive tokens
+grep -v -i -E '(jwt|token|secret|password|auth|bearer|authorization)' "$UPLOAD_OUTPUT_FILE" || cat "$UPLOAD_OUTPUT_FILE"
+echo "=== End of upload script output ==="
+echo ""
 
 if [ $UPLOAD_EXIT_CODE -ne 0 ]; then
   echo -e "${RED}❌ Failed to upload to Pinata (exit code: $UPLOAD_EXIT_CODE)${NC}"
   echo ""
-  echo "=== Upload script output (last 30 lines) ==="
+  echo "=== Error details (last 30 lines) ==="
   # Filter out sensitive info but show errors
-  grep -v -i -E '(jwt|token|secret|password|auth|bearer)' "$UPLOAD_OUTPUT_FILE" | tail -n 30 || cat "$UPLOAD_OUTPUT_FILE" | tail -n 30
-  echo "=== End of upload script output ==="
+  grep -v -i -E '(jwt|token|secret|password|auth|bearer|authorization)' "$UPLOAD_OUTPUT_FILE" | tail -n 30 || tail -n 30 "$UPLOAD_OUTPUT_FILE"
+  echo "=== End of error details ==="
+  echo ""
   
   # Check for specific error types and provide helpful messages
-  if grep -q "NO_SCOPES_FOUND\|403 Forbidden" "$UPLOAD_OUTPUT_FILE"; then
-    echo ""
+  if grep -qi "NO_SCOPES_FOUND\|403.*Forbidden\|scopes" "$UPLOAD_OUTPUT_FILE"; then
     echo -e "${YELLOW}💡 Tip: Your PINATA_JWT token is missing required scopes.${NC}"
     echo -e "${YELLOW}   Please ensure your Pinata API key has the 'pinFileToIPFS' scope enabled.${NC}"
     echo -e "${YELLOW}   Check your Pinata dashboard: https://app.pinata.cloud/developers/api-keys${NC}"
+    echo ""
+  elif grep -qi "401\|Unauthorized" "$UPLOAD_OUTPUT_FILE"; then
+    echo -e "${YELLOW}💡 Tip: Authentication failed. Please check your PINATA_JWT token is valid.${NC}"
+    echo ""
+  elif grep -qi "timeout\|ETIMEDOUT" "$UPLOAD_OUTPUT_FILE"; then
+    echo -e "${YELLOW}💡 Tip: Upload timed out. Try increasing PINATA_UPLOAD_TIMEOUT_MS.${NC}"
+    echo ""
   fi
   
   rm -f "$UPLOAD_OUTPUT_FILE"
