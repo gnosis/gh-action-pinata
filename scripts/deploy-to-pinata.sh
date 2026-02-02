@@ -122,17 +122,23 @@ if [ ! -f "$UPLOAD_SCRIPT" ]; then
   exit 1
 fi
 
-UPLOAD_OUTPUT=$(node "$UPLOAD_SCRIPT" "$TEMP_DIR" "${PROJECT_NAME}-${ENVIRONMENT}-${TIMESTAMP}" 2>&1)
-UPLOAD_EXIT_CODE=$?
-
-# Check if upload script failed
-if [ $UPLOAD_EXIT_CODE -ne 0 ]; then
+# Run upload script and capture both stdout and stderr
+# Use a temporary file to capture output since command substitution might hide errors
+UPLOAD_OUTPUT_FILE=$(mktemp)
+if ! node "$UPLOAD_SCRIPT" "$TEMP_DIR" "${PROJECT_NAME}-${ENVIRONMENT}-${TIMESTAMP}" > "$UPLOAD_OUTPUT_FILE" 2>&1; then
+  UPLOAD_EXIT_CODE=$?
   echo -e "${RED}❌ Failed to upload to Pinata (exit code: $UPLOAD_EXIT_CODE)${NC}"
   echo ""
-  echo "Upload script output:"
-  echo "$UPLOAD_OUTPUT" | grep -v -i -E '(jwt|token|secret|password|auth|bearer)' | tail -n 20
+  echo "=== Upload script output (last 30 lines) ==="
+  # Filter out sensitive info but show errors
+  grep -v -i -E '(jwt|token|secret|password|auth|bearer)' "$UPLOAD_OUTPUT_FILE" | tail -n 30 || cat "$UPLOAD_OUTPUT_FILE" | tail -n 30
+  echo "=== End of upload script output ==="
+  rm -f "$UPLOAD_OUTPUT_FILE"
   exit 1
 fi
+
+UPLOAD_OUTPUT=$(cat "$UPLOAD_OUTPUT_FILE")
+rm -f "$UPLOAD_OUTPUT_FILE"
 
 UPLOAD_JSON=$(echo "$UPLOAD_OUTPUT" | tail -n 1)
 
