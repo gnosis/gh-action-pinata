@@ -123,6 +123,17 @@ if [ ! -f "$UPLOAD_SCRIPT" ]; then
 fi
 
 UPLOAD_OUTPUT=$(node "$UPLOAD_SCRIPT" "$TEMP_DIR" "${PROJECT_NAME}-${ENVIRONMENT}-${TIMESTAMP}" 2>&1)
+UPLOAD_EXIT_CODE=$?
+
+# Check if upload script failed
+if [ $UPLOAD_EXIT_CODE -ne 0 ]; then
+  echo -e "${RED}❌ Failed to upload to Pinata (exit code: $UPLOAD_EXIT_CODE)${NC}"
+  echo ""
+  echo "Upload script output:"
+  echo "$UPLOAD_OUTPUT" | grep -v -i -E '(jwt|token|secret|password|auth|bearer)' | tail -n 20
+  exit 1
+fi
+
 UPLOAD_JSON=$(echo "$UPLOAD_OUTPUT" | tail -n 1)
 
 # Parse JSON once and extract hash in single operation
@@ -134,8 +145,11 @@ if [ -n "$IPFS_HASH" ] && [ "$IPFS_HASH" != "null" ] && [ "$IPFS_HASH" != "empty
   echo -e "${GREEN}✅ Successfully uploaded to Pinata${NC}"
   echo -e "   IPFS Hash: ${YELLOW}${IPFS_HASH}${NC}"
 else
-  echo -e "${RED}❌ Failed to upload to Pinata${NC}"
-  echo "$UPLOAD_OUTPUT" | tail -n 5 | grep -v -i -E '(jwt|token|secret|password|auth)' || echo "Error details hidden for security"
+  echo -e "${RED}❌ Failed to parse IPFS hash from Pinata response${NC}"
+  echo "Last line of upload output: $UPLOAD_JSON"
+  echo ""
+  echo "Full upload output (last 20 lines):"
+  echo "$UPLOAD_OUTPUT" | grep -v -i -E '(jwt|token|secret|password|auth|bearer)' | tail -n 20
   exit 1
 fi
 
