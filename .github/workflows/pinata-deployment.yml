@@ -155,54 +155,61 @@ jobs:
         if: ${{ inputs.cache == 'yarn' || inputs.cache == 'pnpm' }}
         id: fix_pm
         run: |
-          # Check for malformed packageManager fields that would break yarn/pnpm
-          # This must happen BEFORE setup-node tries to use yarn/pnpm for caching
-          # setup-node runs yarn cache dir internally, which checks packageManager fields
-          # We check both workspace root and caller directory
-          FIXED_ANY=false
+          set -e
           
-          # Install jq if not available (needed for JSON parsing)
-          if ! command -v jq >/dev/null 2>&1; then
-            echo "Installing jq..."
-            sudo apt-get update && sudo apt-get install -y jq || echo "⚠️  Could not install jq"
-          fi
+          python3 << 'PYTHON_SCRIPT'
+          import json
+          import sys
+          import re
+          import os
           
-          # Function to check and fix package.json
-          check_and_fix_package_json() {
-            local pkg_file="$1"
-            if [ -f "$pkg_file" ] && command -v jq >/dev/null 2>&1; then
-              PM_FIELD=$(jq -r '.packageManager // empty' "$pkg_file" 2>/dev/null || echo "")
-              if [ -n "$PM_FIELD" ] && [ "$PM_FIELD" != "null" ]; then
-                # Check if format is valid (should be like "yarn@1.22.0" or "pnpm@9.0.0")
-                if ! echo "$PM_FIELD" | grep -qE '^(npm|pnpm|yarn)@[0-9]+\.[0-9]+'; then
-                  echo "⚠️  Warning: Malformed packageManager field in $pkg_file: $PM_FIELD"
-                  echo "⚠️  Temporarily removing it to prevent yarn/pnpm failures"
-                  # Temporarily remove the malformed field
-                  jq 'del(.packageManager)' "$pkg_file" > "${pkg_file}.tmp" && \
-                  mv "${pkg_file}.tmp" "$pkg_file"
-                  echo "✅ Temporarily removed malformed packageManager field from $pkg_file"
-                  return 0  # Fixed
-                fi
-              fi
-            fi
-            return 1  # Not fixed
-          }
+          def check_and_fix_package_json(pkg_file):
+              if not os.path.exists(pkg_file):
+                  return False
+              
+              try:
+                  with open(pkg_file, "r") as f:
+                      data = json.load(f)
+                  
+                  pm_field = data.get("packageManager", "")
+                  if pm_field:
+                      # Check if format is valid (should be like "yarn@1.22.0" or "pnpm@9.0.0")
+                      if not re.match(r'^(npm|pnpm|yarn)@\d+\.\d+', pm_field):
+                          print(f"⚠️  Warning: Malformed packageManager field in {pkg_file}: {pm_field}", file=sys.stderr)
+                          print(f"⚠️  Temporarily removing it to prevent yarn/pnpm failures", file=sys.stderr)
+                          # Remove the malformed field
+                          del data["packageManager"]
+                          with open(pkg_file, "w") as f:
+                              json.dump(data, f, indent=2)
+                              f.write("\n")
+                          print(f"✅ Temporarily removed malformed packageManager field from {pkg_file}", file=sys.stderr)
+                          return True
+              except Exception as e:
+                  print(f"⚠️  Error processing {pkg_file}: {e}", file=sys.stderr)
+              
+              return False
+          
+          fixed_any = False
           
           # Check workspace root (where setup-node runs from)
-          if check_and_fix_package_json "package.json"; then
-            FIXED_ANY=true
-          fi
+          if check_and_fix_package_json("package.json"):
+              fixed_any = True
           
-          # Check caller directory
-          if [ -d "caller" ] && check_and_fix_package_json "caller/package.json"; then
-            FIXED_ANY=true
-          fi
+          # Check caller directory (if it exists)
+          if os.path.exists("caller/package.json"):
+              if check_and_fix_package_json("caller/package.json"):
+                  fixed_any = True
           
-          if [ "$FIXED_ANY" = "true" ]; then
+          if not fixed_any:
+              print("✅ No malformed packageManager fields found")
+          
+          sys.exit(0 if fixed_any else 1)
+          PYTHON_SCRIPT
+          
+          if [ $? -eq 0 ]; then
             echo "fixed=true" >> "$GITHUB_OUTPUT"
           else
             echo "fixed=false" >> "$GITHUB_OUTPUT"
-            echo "✅ No malformed packageManager fields found"
           fi
 
       - name: Install package manager for caching (if needed)
