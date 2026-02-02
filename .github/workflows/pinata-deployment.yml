@@ -155,8 +155,6 @@ jobs:
         if: ${{ inputs.cache == 'yarn' || inputs.cache == 'pnpm' }}
         id: fix_pm
         run: |
-          set -e
-          
           python3 << 'PYTHON_SCRIPT'
           import json
           import sys
@@ -202,15 +200,12 @@ jobs:
           
           if not fixed_any:
               print("✅ No malformed packageManager fields found")
+          else:
+              print("✅ Fixed malformed packageManager fields")
           
-          sys.exit(0 if fixed_any else 1)
+          # Always exit with success (0) - finding no malformed fields is also success
+          sys.exit(0)
           PYTHON_SCRIPT
-          
-          if [ $? -eq 0 ]; then
-            echo "fixed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "fixed=false" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Install package manager for caching (if needed)
         run: |
