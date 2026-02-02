@@ -111,16 +111,6 @@ jobs:
           fetch-depth: 1
           path: pinata
 
-      - name: Disable corepack to avoid conflicts
-        run: |
-          # Disable corepack initially to avoid conflicts with caller repo's packageManager field
-          # Some repos may have malformed packageManager fields that would cause corepack to fail
-          # We'll enable it later only for the pinata repo
-          if command -v corepack >/dev/null 2>&1; then
-            corepack disable 2>/dev/null || true
-            echo "✅ Corepack disabled to prevent conflicts with caller repo"
-          fi
-
       - name: Detect caller package manager and prepare environment
         if: ${{ !inputs.use_prebuilt_build }}
         id: detect_pm
@@ -145,6 +135,28 @@ jobs:
             echo "default_install=npm ci" >> "$GITHUB_OUTPUT"
           fi
           echo "Detected package manager: $(cat "$GITHUB_OUTPUT" | grep "^pm=" | cut -d= -f2)"
+
+      - name: Enable corepack for package manager (if needed)
+        run: |
+          # Enable corepack if cache is set to yarn or pnpm
+          # setup-node requires the package manager to be available for caching
+          CACHE_MANAGER="${{ inputs.cache }}"
+          if [ "$CACHE_MANAGER" = "yarn" ] || [ "$CACHE_MANAGER" = "pnpm" ]; then
+            if command -v corepack >/dev/null 2>&1; then
+              # Enable corepack to make yarn/pnpm available
+              # We'll disable it later before working with caller repo if needed
+              corepack enable
+              echo "✅ Corepack enabled for $CACHE_MANAGER"
+            else
+              echo "⚠️  Warning: corepack not available, $CACHE_MANAGER may not work"
+            fi
+          else
+            # For npm, corepack is not needed
+            if command -v corepack >/dev/null 2>&1; then
+              corepack disable 2>/dev/null || true
+              echo "✅ Corepack disabled (using npm)"
+            fi
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -295,10 +307,20 @@ jobs:
         working-directory: caller
         shell: bash
         run: |
-          # Ensure corepack remains disabled to avoid conflicts with caller repo's packageManager field
-          # Some repos may have malformed packageManager fields that would cause corepack to fail
-          if command -v corepack >/dev/null 2>&1; then
-            corepack disable 2>/dev/null || true
+          # Check if caller repo has a malformed packageManager field that would break corepack
+          # If so, disable corepack temporarily for this step
+          if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
+            PM_FIELD=$(jq -r '.packageManager // empty' package.json 2>/dev/null || echo "")
+            if [ -n "$PM_FIELD" ] && [ "$PM_FIELD" != "null" ]; then
+              # Check if format is valid (should be like "yarn@1.22.0" or "pnpm@9.0.0")
+              if ! echo "$PM_FIELD" | grep -qE '^(npm|pnpm|yarn)@[0-9]+\.[0-9]+'; then
+                echo "⚠️  Warning: Malformed packageManager field detected: $PM_FIELD"
+                echo "⚠️  Temporarily disabling corepack to avoid conflicts"
+                if command -v corepack >/dev/null 2>&1; then
+                  corepack disable 2>/dev/null || true
+                fi
+              fi
+            fi
           fi
           
           # Use detected default install command if install_command is the default value
