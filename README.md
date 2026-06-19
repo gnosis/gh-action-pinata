@@ -52,7 +52,7 @@ jobs:
 
 ### Optional
 
-- `node_version`: Node.js version (default: `"20.15.1"`)
+- `node_version`: Node.js version (default: `"^24"`)
 - `cache`: Dependency cache manager for `actions/setup-node` (`npm`, `pnpm`, or `yarn`; default: `"npm"`)
 - `pinata_upload_timeout_ms`: Pinata upload HTTP request timeout in milliseconds (default: `300000`)
 - `install_command`: Command to install dependencies (default: `"npm ci"`)
