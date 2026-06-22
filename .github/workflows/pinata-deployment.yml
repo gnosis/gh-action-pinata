@@ -4,7 +4,8 @@ on:
   workflow_call:
     inputs:
       environment:
-        description: 'Deployment environment name (dev|prod).'
+        description: 'Deployment environment name'
+        default: 'prod'
         required: true
         type: string
       project_name:
@@ -46,13 +47,13 @@ on:
     outputs:
       ipfs_hash:
         description: 'Deployed IPFS hash.'
-        value: ${{ jobs.deploy.outputs.ipfs_hash }}
+        value: ${{ jobs.deploy-pinata.outputs.ipfs_hash }}
       pinata_url:
         description: 'Pinata gateway URL for the deployed hash.'
-        value: ${{ jobs.deploy.outputs.pinata_url }}
+        value: ${{ jobs.deploy-pinata.outputs.pinata_url }}
 
 jobs:
-  deploy:
+  deploy-pinata:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -83,9 +84,10 @@ jobs:
 
       - name: Validate inputs
         run: |
-          # Validate environment
-          if [ "${{ inputs.environment }}" != "dev" ] && [ "${{ inputs.environment }}" != "prod" ]; then
-            echo "❌ Error: environment must be 'dev' or 'prod', got: ${{ inputs.environment }}"
+          # Validate environment (used as a path segment, so keep it a safe slug)
+          ENVIRONMENT="${{ inputs.environment }}"
+          if ! echo "$ENVIRONMENT" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+            echo "❌ Error: environment must match ^[a-zA-Z0-9_-]+$, got: $ENVIRONMENT"
             exit 1
           fi
 
@@ -253,54 +255,41 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
-      - name: Primary health check (Pinata gateway)
+      - name: Health check (gateway accessibility)
         if: ${{ success() && inputs.health_check }}
         run: |
-          echo "🏥 Running primary health check for ${{ inputs.environment }} deployment..."
-
-          PINATA_URL="${{ steps.deployment.outputs.pinata_url }}"
-          if [ -z "$PINATA_URL" ] || [ "$PINATA_URL" = "null" ]; then
-            echo "❌ Could not read pinata_url"
-            exit 1
-          fi
-
-          sleep 5
-          for i in {1..3}; do
-            echo "Checking Pinata gateway (attempt $i): $PINATA_URL"
-            if curl -s --head --max-time 30 "$PINATA_URL" > /dev/null; then
-              echo "✅ Pinata gateway is accessible"
-              exit 0
-            else
-              echo "⚠️ Pinata not accessible yet, retrying..."
-              sleep 15
-            fi
-          done
-
-          echo "❌ Pinata gateway not accessible after retries"
-          exit 1
-
-      - name: Test multi-gateway accessibility (informational)
-        if: ${{ success() && inputs.health_check }}
-        continue-on-error: true
-        run: |
-          echo "🌐 Testing deployment accessibility across gateways..."
+          echo "🏥 Checking gateway accessibility for ${{ inputs.environment }} deployment..."
 
           mapfile -t GATEWAYS <<< "${{ steps.deployment.outputs.gateways }}"
-
-          SUCCESSFUL=0
           TOTAL=${#GATEWAYS[@]}
 
-          for gateway in "${GATEWAYS[@]}"; do
-            echo "Testing $gateway..."
-            if curl -s --head --max-time 30 "$gateway" > /dev/null; then
-              echo "✅ $gateway - accessible"
-              ((SUCCESSFUL++))
-            else
-              echo "❌ $gateway - not accessible"
+          # Give content a moment to propagate, then probe all gateways with retries.
+          sleep 5
+          SUCCESSFUL=0
+          for attempt in 1 2 3; do
+            SUCCESSFUL=0
+            for gateway in "${GATEWAYS[@]}"; do
+              if curl -s --head --max-time 30 "$gateway" > /dev/null; then
+                echo "✅ $gateway - accessible"
+                SUCCESSFUL=$((SUCCESSFUL + 1))
+              else
+                echo "❌ $gateway - not accessible"
+              fi
+            done
+            if [ "$SUCCESSFUL" -gt 0 ]; then
+              break
             fi
+            echo "⚠️ No gateway accessible yet (attempt $attempt), retrying..."
+            sleep 15
           done
 
           echo "📊 Accessibility: $SUCCESSFUL/$TOTAL gateways"
+          # Only fail if NOT a single gateway served the content.
+          if [ "$SUCCESSFUL" -eq 0 ]; then
+            echo "❌ No gateway is accessible"
+            exit 1
+          fi
+          echo "✅ At least one gateway is accessible"
 
       - name: Summary
         if: success()

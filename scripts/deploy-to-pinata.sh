@@ -38,15 +38,16 @@ COMMIT_HASH=${6:-unknown}
 # Validate arguments
 if [ -z "$ENVIRONMENT" ] || [ -z "$BUILD_DIR" ] || [ -z "$PROJECT_NAME" ] || [ -z "$TIMESTAMP" ]; then
   echo -e "${RED}❌ Usage: $0 <environment> <build_dir> <project_name> <timestamp> [branch] [commit_hash]${NC}"
-  echo -e "${YELLOW}   environment: dev or prod${NC}"
+  echo -e "${YELLOW}   environment: name slug (e.g. dev, prod, staging)${NC}"
   echo -e "${YELLOW}   build_dir: path to build directory${NC}"
   echo -e "${YELLOW}   project_name: name of the project${NC}"
   echo -e "${YELLOW}   timestamp: deployment timestamp${NC}"
   exit 1
 fi
 
-if [ "$ENVIRONMENT" != "dev" ] && [ "$ENVIRONMENT" != "prod" ]; then
-  echo -e "${RED}❌ Environment must be 'dev' or 'prod'${NC}"
+# environment is used as a path segment, so keep it a safe slug
+if ! echo "$ENVIRONMENT" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+  echo -e "${RED}❌ Environment must match ^[a-zA-Z0-9_-]+\$ (got: $ENVIRONMENT)${NC}"
   exit 1
 fi
 

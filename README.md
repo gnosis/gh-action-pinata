@@ -72,7 +72,7 @@ jobs:
 
 ### Required
 
-- `environment`: Deployment environment (`dev` or `prod`)
+- `environment`: Deployment environment name slug — `^[a-zA-Z0-9_-]+$` (e.g. `dev`, `prod`, `staging`)
 - `project_name`: Project name (used for Pinata metadata)
 - `build_artifact_name`: Name of the prebuilt artifact (uploaded earlier in the same run) to deploy
 
