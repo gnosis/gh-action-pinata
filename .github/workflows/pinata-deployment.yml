@@ -304,9 +304,13 @@ jobs:
           CID_V0="$IPFS_HASH"
           CID_V1="$IPFS_HASH"
           if CID_OUT="$(node pinata/scripts/cid-convert.mjs "$IPFS_HASH" 2>/dev/null)"; then
-            eval "$CID_OUT"
-            CID_V0="$cid_v0"
-            CID_V1="$cid_v1"
+            # Parse the key=value lines explicitly (never eval untrusted output).
+            while IFS='=' read -r key value; do
+              case "$key" in
+                cid_v0) CID_V0="$value" ;;
+                cid_v1) CID_V1="$value" ;;
+              esac
+            done <<< "$CID_OUT"
           fi
 
           {

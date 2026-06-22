@@ -89,20 +89,51 @@ function base32Decode(str, alphabet) {
   return Uint8Array.from(out)
 }
 
+const DAG_PB = 0x70 // multicodec content type for dag-pb
+const SHA2_256 = 0x12 // multihash hash function code
+const SHA2_256_LEN = 0x20 // 32 bytes
+
+// Read an unsigned LEB128 varint at `offset`. Returns { value, length }.
+function readVarint(bytes, offset) {
+  let value = 0
+  let shift = 0
+  let length = 0
+  for (;;) {
+    if (offset + length >= bytes.length) throw new Error('Truncated varint')
+    const byte = bytes[offset + length]
+    value += (byte & 0x7f) * 2 ** shift
+    length += 1
+    if ((byte & 0x80) === 0) break
+    shift += 7
+    if (shift > 35) throw new Error('Varint too long')
+  }
+  return { value, length }
+}
+
+// Validate a dag-pb sha2-256 multihash (0x12 0x20 + 32 bytes) and return it.
+function assertDagPbMultihash(mh) {
+  if (mh.length !== 34 || mh[0] !== SHA2_256 || mh[1] !== SHA2_256_LEN) {
+    throw new Error('Expected a dag-pb sha2-256 multihash (0x12 0x20 + 32 bytes)')
+  }
+  return mh
+}
+
 // Extract the dag-pb sha2-256 multihash (0x12 0x20 + 32 bytes) from any CID form.
 function multihashFromCid(cid) {
   if (cid.startsWith('Qm')) {
-    const mh = baseDecode(cid, B58_ALPHABET)
-    if (mh.length !== 34 || mh[0] !== 0x12 || mh[1] !== 0x20) {
-      throw new Error('Unexpected CIDv0 multihash layout')
-    }
-    return mh
+    // CIDv0 is the bare dag-pb sha2-256 multihash, base58btc-encoded.
+    return assertDagPbMultihash(baseDecode(cid, B58_ALPHABET))
   }
   if (cid.startsWith('b')) {
+    // CIDv1 base32: <version><codec><multihash>, version and codec are varints.
     const bytes = base32Decode(cid.slice(1), B32_ALPHABET)
-    // <version=1><codec><multihash...>
-    if (bytes[0] !== 0x01) throw new Error('Only CIDv1 base32 is supported')
-    return bytes.slice(2)
+    const version = readVarint(bytes, 0)
+    if (version.value !== 1) throw new Error('Only CIDv1 base32 is supported')
+    const codec = readVarint(bytes, version.length)
+    if (codec.value !== DAG_PB) {
+      throw new Error(`Unsupported CIDv1 codec 0x${codec.value.toString(16)} (expected dag-pb 0x70)`)
+    }
+    return assertDagPbMultihash(bytes.slice(version.length + codec.length))
   }
   throw new Error(`Unsupported CID format: ${cid}`)
 }
