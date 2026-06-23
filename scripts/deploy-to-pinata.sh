@@ -38,15 +38,16 @@ COMMIT_HASH=${6:-unknown}
 # Validate arguments
 if [ -z "$ENVIRONMENT" ] || [ -z "$BUILD_DIR" ] || [ -z "$PROJECT_NAME" ] || [ -z "$TIMESTAMP" ]; then
   echo -e "${RED}❌ Usage: $0 <environment> <build_dir> <project_name> <timestamp> [branch] [commit_hash]${NC}"
-  echo -e "${YELLOW}   environment: dev or prod${NC}"
+  echo -e "${YELLOW}   environment: name slug (e.g. dev, prod, staging)${NC}"
   echo -e "${YELLOW}   build_dir: path to build directory${NC}"
   echo -e "${YELLOW}   project_name: name of the project${NC}"
   echo -e "${YELLOW}   timestamp: deployment timestamp${NC}"
   exit 1
 fi
 
-if [ "$ENVIRONMENT" != "dev" ] && [ "$ENVIRONMENT" != "prod" ]; then
-  echo -e "${RED}❌ Environment must be 'dev' or 'prod'${NC}"
+# environment is used as a path segment, so keep it a safe slug
+if ! echo "$ENVIRONMENT" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+  echo -e "${RED}❌ Environment must match ^[a-zA-Z0-9_-]+\$ (got: $ENVIRONMENT)${NC}"
   exit 1
 fi
 
@@ -66,6 +67,21 @@ fi
 DEPLOYMENTS_DIR="deployments"
 DEPLOYMENT_FILE="${DEPLOYMENTS_DIR}/${ENVIRONMENT}/deployment-${TIMESTAMP}.json"
 LOG_FILE="${DEPLOYMENTS_DIR}/logs/${ENVIRONMENT}-deployments.log"
+
+# IPFS gateway bases — single source of truth for this deployment.
+# The first entry is the primary/dedicated gateway used for verification and as
+# the canonical pinata_url. Full URLs and metadata are derived from this list,
+# and the workflow reads them back out of the deployment JSON (no duplication).
+IPFS_GATEWAYS=(
+  "https://gnosis.mypinata.cloud/ipfs"
+  "https://ipfs.io/ipfs"
+  "https://dweb.link/ipfs"
+)
+
+# Build full "<base>/<hash>/" URL for a gateway base.
+gateway_url() {
+  printf '%s/%s/' "$1" "$2"
+}
 
 echo -e "${BLUE}🚀 Starting IPFS Deployment to Pinata${NC}"
 echo -e "${BLUE}====================================${NC}"
@@ -189,7 +205,7 @@ fi
 
 # Step 3: Verify via Pinata gateway (best-effort)
 echo -e "${YELLOW}🔍 Verifying deployment (Pinata gateway)...${NC}"
-PINATA_URL="https://gateway.pinata.cloud/ipfs/$IPFS_HASH"
+PINATA_URL="$(gateway_url "${IPFS_GATEWAYS[0]}" "$IPFS_HASH")"
 if curl -s --head --max-time 10 "$PINATA_URL" >/dev/null; then
   echo -e "${GREEN}✅ Content accessible via Pinata gateway${NC}"
 else
@@ -210,6 +226,13 @@ fi
 # Sanitize project_name
 SANITIZED_PROJECT_NAME=$(echo "$PROJECT_NAME" | tr -cd '[:alnum:]-_' | head -c 100)
 
+# Derive the gateway URL list from IPFS_GATEWAYS (first entry = primary).
+GATEWAY_URLS=()
+for base in "${IPFS_GATEWAYS[@]}"; do
+  GATEWAY_URLS+=("$(gateway_url "$base" "$IPFS_HASH")")
+done
+URLS_JSON=$(printf '%s\n' "${GATEWAY_URLS[@]}" | jq -R . | jq -s .)
+
 jq -n \
   --arg project "$SANITIZED_PROJECT_NAME" \
   --arg environment "$ENVIRONMENT" \
@@ -219,7 +242,8 @@ jq -n \
   --arg commit "$COMMIT_HASH" \
   --arg deployed_at "$(date -Iseconds)" \
   --argjson pinata_response "$PINATA_RESPONSE_JSON" \
-  --arg ipfs_hash_val "$IPFS_HASH" \
+  --arg pinata_url "$PINATA_URL" \
+  --argjson urls "$URLS_JSON" \
   '{
     project: $project,
     environment: $environment,
@@ -229,13 +253,9 @@ jq -n \
     commit: $commit,
     deployed_at: $deployed_at,
     pinata_response: $pinata_response,
+    pinata_url: $pinata_url,
     urls: {
-      ipfs: [
-        "https://gateway.pinata.cloud/ipfs/\($ipfs_hash_val)",
-        "https://ipfs.io/ipfs/\($ipfs_hash_val)",
-        "https://cloudflare-ipfs.com/ipfs/\($ipfs_hash_val)",
-        "https://dweb.link/ipfs/\($ipfs_hash_val)"
-      ]
+      ipfs: $urls
     }
   }' > "$DEPLOYMENT_FILE"
 

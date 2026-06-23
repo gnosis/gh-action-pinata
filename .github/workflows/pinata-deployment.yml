@@ -4,65 +4,27 @@ on:
   workflow_call:
     inputs:
       environment:
-        description: 'Deployment environment name (dev|prod).'
+        description: 'Deployment environment name'
+        default: 'prod'
         required: true
         type: string
       project_name:
         description: 'Project name used for Pinata metadata.'
         required: true
         type: string
-      node_version:
-        description: 'Node.js version used to build the caller repo and to run the uploader.'
-        required: false
-        default: '20.15.1'
-        type: string
-      cache:
-        description: 'Dependency cache manager for actions/setup-node (npm|pnpm|yarn).'
-        required: false
-        default: 'npm'
-        type: string
       pinata_upload_timeout_ms:
         description: 'Pinata upload HTTP request timeout in milliseconds.'
         required: false
         default: 300000
         type: number
-      install_command:
-        description: 'Command to install dependencies in the caller repo.'
-        required: false
-        default: 'npm ci'
-        type: string
-      build_command:
-        description: 'Command to build the caller repo.'
-        required: false
-        default: 'npm run build'
-        type: string
-      build_env:
-        description: 'Optional newline-separated KEY=VALUE envs for build.'
-        required: false
-        default: ''
-        type: string
-      use_prebuilt_build:
-        description: 'Skip build and use a prebuilt artifact.'
-        required: false
-        default: false
-        type: boolean
       build_artifact_name:
-        description: 'Artifact name that contains the prebuilt build output.'
-        required: false
-        default: ''
+        description: 'Name of the prebuilt artifact (uploaded earlier in the same run) to deploy.'
+        required: true
         type: string
       build_dir:
-        description: 'Build output directory (relative to caller repo).'
+        description: 'Directory the artifact is extracted into and deployed from.'
         required: false
         default: 'out'
-        type: string
-      caller_repository:
-        description: 'Optional: repository to deploy (owner/repo). Defaults to the caller.'
-        required: false
-        type: string
-      caller_ref:
-        description: 'Optional: git ref (sha/branch/tag) to deploy. Defaults to the caller ref.'
-        required: false
         type: string
       pinata_action_repository:
         description: 'Repo to use for pinata action (owner/repo).'
@@ -74,19 +36,24 @@ on:
         required: false
         default: 'main'
         type: string
+      health_check:
+        description: 'Run post-deploy gateway health checks before writing the summary.'
+        required: false
+        default: true
+        type: boolean
     secrets:
       PINATA_JWT:
         required: true
     outputs:
       ipfs_hash:
         description: 'Deployed IPFS hash.'
-        value: ${{ jobs.deploy.outputs.ipfs_hash }}
+        value: ${{ jobs.deploy-pinata.outputs.ipfs_hash }}
       pinata_url:
         description: 'Pinata gateway URL for the deployed hash.'
-        value: ${{ jobs.deploy.outputs.pinata_url }}
+        value: ${{ jobs.deploy-pinata.outputs.pinata_url }}
 
 jobs:
-  deploy:
+  deploy-pinata:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -94,160 +61,33 @@ jobs:
       ipfs_hash: ${{ steps.deployment.outputs.ipfs_hash }}
       pinata_url: ${{ steps.deployment.outputs.pinata_url }}
     steps:
-      - name: Checkout caller repo
-        if: ${{ !inputs.use_prebuilt_build }}
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          repository: ${{ inputs.caller_repository || github.repository }}
-          ref: ${{ inputs.caller_ref || github.sha }}
-          fetch-depth: 0
-          path: caller
-
       - name: Checkout pinata deploy action repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ${{ inputs.pinata_action_repository }}
           ref: ${{ inputs.pinata_action_ref }}
           fetch-depth: 1
           path: pinata
 
-      - name: Detect caller package manager and prepare environment
-        if: ${{ !inputs.use_prebuilt_build }}
-        id: detect_pm
-        run: |
-          cd caller
-          if [ -f "package-lock.json" ]; then
-            echo "pm=npm" >> "$GITHUB_OUTPUT"
-            echo "lockfile=package-lock.json" >> "$GITHUB_OUTPUT"
-            echo "default_install=npm ci" >> "$GITHUB_OUTPUT"
-          elif [ -f "pnpm-lock.yaml" ]; then
-            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
-            echo "lockfile=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
-            echo "default_install=pnpm install --frozen-lockfile" >> "$GITHUB_OUTPUT"
-          elif [ -f "yarn.lock" ]; then
-            echo "pm=yarn" >> "$GITHUB_OUTPUT"
-            echo "lockfile=yarn.lock" >> "$GITHUB_OUTPUT"
-            echo "default_install=yarn install --frozen-lockfile" >> "$GITHUB_OUTPUT"
-          else
-            # Default to npm if no lockfile found
-            echo "pm=npm" >> "$GITHUB_OUTPUT"
-            echo "lockfile=" >> "$GITHUB_OUTPUT"
-            echo "default_install=npm ci" >> "$GITHUB_OUTPUT"
-          fi
-          echo "Detected package manager: $(cat "$GITHUB_OUTPUT" | grep "^pm=" | cut -d= -f2)"
-
-      - name: Setup Node.js (without cache)
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
-          node-version: ${{ inputs.node_version }}
+          version: 9
 
-      - name: Remove packageManager fields (prevent Corepack conflicts)
-        if: ${{ inputs.cache == 'yarn' || inputs.cache == 'pnpm' }}
-        run: |
-          # Remove ALL packageManager fields to prevent Corepack from interfering
-          # We manage package managers manually via npm install -g, so we don't need these fields
-          # This prevents yarn/pnpm from checking packageManager fields and failing
-          python3 << 'PYTHON_SCRIPT'
-          import json
-          import sys
-          import os
-          
-          def remove_package_manager_field(pkg_file):
-              if not os.path.exists(pkg_file):
-                  return False
-              
-              try:
-                  with open(pkg_file, "r") as f:
-                      data = json.load(f)
-                  
-                  if "packageManager" in data:
-                      pm_field = data["packageManager"]
-                      print(f"⚠️  Removing packageManager field from {pkg_file}: {pm_field}", file=sys.stderr)
-                      del data["packageManager"]
-                      with open(pkg_file, "w") as f:
-                          json.dump(data, f, indent=2)
-                          f.write("\n")
-                      print(f"✅ Removed packageManager field from {pkg_file}", file=sys.stderr)
-                      return True
-              except Exception as e:
-                  print(f"⚠️  Error processing {pkg_file}: {e}", file=sys.stderr)
-              
-              return False
-          
-          removed_any = False
-          
-          # Check workspace root (where setup-node runs from)
-          if remove_package_manager_field("package.json"):
-              removed_any = True
-          
-          # Check caller directory (if it exists)
-          if os.path.exists("caller/package.json"):
-              if remove_package_manager_field("caller/package.json"):
-                  removed_any = True
-          
-          # Check pinata directory (we'll handle pnpm installation manually)
-          if os.path.exists("pinata/package.json"):
-              if remove_package_manager_field("pinata/package.json"):
-                  removed_any = True
-          
-          if not removed_any:
-              print("✅ No packageManager fields found (or already removed)")
-          else:
-              print("✅ Removed packageManager fields to prevent Corepack conflicts")
-          
-          sys.exit(0)
-          PYTHON_SCRIPT
-
-      - name: Install package manager for caching (if needed)
-        run: |
-          # Install yarn/pnpm if cache is set to them
-          # setup-node requires the package manager to be available for caching
-          # We install directly via npm (no Corepack needed)
-          CACHE_MANAGER="${{ inputs.cache }}"
-          if [ "$CACHE_MANAGER" = "yarn" ]; then
-            if ! command -v yarn >/dev/null 2>&1; then
-              echo "Installing yarn via npm..."
-              npm install -g yarn
-              echo "✅ Yarn installed"
-            else
-              echo "✅ Yarn already available"
-            fi
-            # Verify yarn works (use --ignore-engines to avoid packageManager field checks)
-            yarn --version || echo "⚠️  Yarn version check failed, but yarn is installed"
-          elif [ "$CACHE_MANAGER" = "pnpm" ]; then
-            if ! command -v pnpm >/dev/null 2>&1; then
-              echo "Installing pnpm via npm..."
-              npm install -g pnpm
-              echo "✅ pnpm installed"
-            else
-              echo "✅ pnpm already available"
-            fi
-            pnpm --version || echo "⚠️  pnpm version check failed, but pnpm is installed"
-          fi
-
-      - name: Setup Node.js cache
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: ${{ inputs.node_version }}
-          cache: ${{ inputs.cache }}
+          node-version: 24
+          cache: pnpm
           cache-dependency-path: |
-            caller/package-lock.json
-            caller/pnpm-lock.yaml
-            caller/yarn.lock
             pinata/pnpm-lock.yaml
 
       - name: Validate inputs
         run: |
-          # Validate environment
-          if [ "${{ inputs.environment }}" != "dev" ] && [ "${{ inputs.environment }}" != "prod" ]; then
-            echo "❌ Error: environment must be 'dev' or 'prod', got: ${{ inputs.environment }}"
-            exit 1
-          fi
-
-          # Validate cache manager
-          CACHE_MANAGER="${{ inputs.cache }}"
-          if [ "$CACHE_MANAGER" != "npm" ] && [ "$CACHE_MANAGER" != "pnpm" ] && [ "$CACHE_MANAGER" != "yarn" ]; then
-            echo "❌ Error: cache must be one of: npm|pnpm|yarn, got: $CACHE_MANAGER"
+          # Validate environment (used as a path segment, so keep it a safe slug)
+          ENVIRONMENT="${{ inputs.environment }}"
+          if ! echo "$ENVIRONMENT" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+            echo "❌ Error: environment must match ^[a-zA-Z0-9_-]+$, got: $ENVIRONMENT"
             exit 1
           fi
 
@@ -279,69 +119,10 @@ jobs:
             exit 1
           fi
 
-          # Validate install_command
-          if [ "${{ inputs.use_prebuilt_build }}" = "false" ]; then
-            INSTALL_CMD="${{ inputs.install_command }}"
-            if [ -z "$INSTALL_CMD" ]; then
-              echo "❌ Error: install_command cannot be empty"
-              exit 1
-            fi
-            if echo "$INSTALL_CMD" | grep -qE '[;&|<>`$()]'; then
-              echo "❌ Error: install_command contains potentially dangerous characters"
-              exit 1
-            fi
-          fi
-
-          # Validate build_command
-          if [ "${{ inputs.use_prebuilt_build }}" = "false" ]; then
-            BUILD_CMD="${{ inputs.build_command }}"
-            if [ -z "$BUILD_CMD" ]; then
-              echo "❌ Error: build_command cannot be empty"
-              exit 1
-            fi
-            if echo "$BUILD_CMD" | grep -qE '[;&|<>`$()]'; then
-              echo "❌ Error: build_command contains potentially dangerous characters"
-              exit 1
-            fi
-          fi
-
-          # Validate build_env keys (if provided)
-          if [ "${{ inputs.use_prebuilt_build }}" = "false" ]; then
-            BUILD_ENV="${{ inputs.build_env }}"
-            if [ -n "$BUILD_ENV" ]; then
-              while IFS= read -r line; do
-                [ -z "$line" ] && continue
-                KEY="${line%%=*}"
-                if ! echo "$KEY" | grep -qE '^[A-Z0-9_]+$'; then
-                  echo "❌ Error: build_env key must be [A-Z0-9_]+, got: $KEY"
-                  exit 1
-                fi
-              done < <(printf '%s\n' "${{ inputs.build_env }}")
-            fi
-          fi
-
           # Validate build artifact name
-          if [ "${{ inputs.use_prebuilt_build }}" = "true" ] && [ -z "${{ inputs.build_artifact_name }}" ]; then
-            echo "❌ Error: build_artifact_name is required when use_prebuilt_build is true"
+          if [ -z "${{ inputs.build_artifact_name }}" ]; then
+            echo "❌ Error: build_artifact_name is required"
             exit 1
-          fi
-
-          # Validate caller_repository format (owner/repo)
-          if [ -n "${{ inputs.caller_repository }}" ]; then
-            CALLER_REPO="${{ inputs.caller_repository }}"
-            if ! echo "$CALLER_REPO" | grep -qE '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$'; then
-              echo "❌ Error: caller_repository must be in format 'owner/repo', got: $CALLER_REPO"
-              exit 1
-            fi
-          fi
-
-          # Validate caller_ref
-          if [ -n "${{ inputs.caller_ref }}" ]; then
-            CALLER_REF="${{ inputs.caller_ref }}"
-            if echo "$CALLER_REF" | grep -qE '[;&|<>`$()]'; then
-              echo "❌ Error: caller_ref contains potentially dangerous characters"
-              exit 1
-            fi
           fi
 
           # Validate pinata_action_ref
@@ -368,81 +149,33 @@ jobs:
 
           echo "✅ Input validation passed"
 
-      - name: Install caller dependencies
-        if: ${{ !inputs.use_prebuilt_build }}
-        timeout-minutes: 10
-        working-directory: caller
-        shell: bash
-        run: |
-          # Use detected default install command if install_command is the default value
-          INSTALL_CMD="${{ inputs.install_command }}"
-          if [ "$INSTALL_CMD" = "npm ci" ] && [ -n "${{ steps.detect_pm.outputs.default_install }}" ]; then
-            INSTALL_CMD="${{ steps.detect_pm.outputs.default_install }}"
-            echo "Using auto-detected install command: $INSTALL_CMD"
-          fi
-          
-          # Run the install command
-          $INSTALL_CMD
-
-      - name: Set build environment variables
-        if: ${{ !inputs.use_prebuilt_build && inputs.build_env != '' }}
-        run: |
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            KEY="${line%%=*}"
-            VALUE="${line#*=}"
-            printf '%s=%s\n' "$KEY" "$VALUE" >> "$GITHUB_ENV"
-          done < <(printf '%s\n' "${{ inputs.build_env }}")
-
-      - name: Build caller repo
-        if: ${{ !inputs.use_prebuilt_build }}
-        timeout-minutes: 30
-        working-directory: caller
-        shell: bash
-        run: |
-          ${{ inputs.build_command }}
-
       - name: Download prebuilt artifact
-        if: ${{ inputs.use_prebuilt_build }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ inputs.build_artifact_name }}
-          path: caller/${{ inputs.build_dir }}
+          path: ${{ inputs.build_dir }}
 
-      - name: Validate build output
+      - name: Validate artifact contents
         run: |
-          BUILD_DIR="caller/${{ inputs.build_dir }}"
+          BUILD_DIR="${{ inputs.build_dir }}"
           if [ ! -d "$BUILD_DIR" ]; then
-            echo "❌ Error: Build directory '$BUILD_DIR' not found after build"
+            echo "❌ Error: Artifact directory '$BUILD_DIR' not found after download"
             exit 1
           fi
 
           FILE_COUNT=$(find "$BUILD_DIR" -type f | wc -l)
           if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "❌ Error: Build directory '$BUILD_DIR' is empty"
+            echo "❌ Error: Artifact directory '$BUILD_DIR' is empty"
             exit 1
           fi
 
-          echo "✅ Build output validated: $FILE_COUNT files found"
+          echo "✅ Artifact contents validated: $FILE_COUNT files found"
 
       - name: Install pinata uploader dependencies
         timeout-minutes: 5
         working-directory: pinata
         shell: bash
         run: |
-          # Install pnpm via npm (no Corepack needed)
-          if ! command -v pnpm >/dev/null 2>&1; then
-            echo "Installing pnpm via npm..."
-            npm install -g pnpm
-            echo "✅ pnpm installed"
-          else
-            echo "✅ pnpm already available"
-          fi
-          
-          # Verify pnpm is available
-          pnpm --version
-          
-          # Install dependencies for pinata uploader
           pnpm install --frozen-lockfile
 
       - name: Install jq/curl
@@ -465,7 +198,7 @@ jobs:
           TS="$(date +%Y%m%d-%H%M%S)"
           pinata/scripts/deploy-to-pinata.sh \
             "${{ inputs.environment }}" \
-            "caller/${{ inputs.build_dir }}" \
+            "${{ inputs.build_dir }}" \
             "${{ inputs.project_name }}" \
             "$TS" \
             "${{ github.ref_name }}" \
@@ -493,15 +226,27 @@ jobs:
             exit 1
           fi
 
-          PINATA_URL="https://gateway.pinata.cloud/ipfs/$IPFS_HASH"
+          # Gateway URLs are owned by the deploy script and stored in the deployment
+          # JSON — read them back here instead of re-defining the gateway list.
+          PINATA_URL=$(jq -r '.pinata_url' "$FILE")
+          if [ -z "$PINATA_URL" ] || [ "$PINATA_URL" = "null" ]; then
+            echo "❌ Invalid or missing pinata_url in deployment file"
+            exit 1
+          fi
+
           echo "ipfs_hash=$IPFS_HASH" >> "$GITHUB_OUTPUT"
           echo "pinata_url=$PINATA_URL" >> "$GITHUB_OUTPUT"
+          {
+            echo "gateways<<__GATEWAYS_EOF__"
+            jq -r '.urls.ipfs[]' "$FILE"
+            echo "__GATEWAYS_EOF__"
+          } >> "$GITHUB_OUTPUT"
 
           echo "✅ Deployment info extracted successfully"
 
       - name: Upload deployment artifacts
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: deployment-${{ inputs.environment }}-${{ github.sha }}
           path: |
@@ -510,14 +255,83 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
+      - name: Health check (gateway accessibility)
+        if: ${{ success() && inputs.health_check }}
+        run: |
+          echo "🏥 Checking gateway accessibility for ${{ inputs.environment }} deployment..."
+
+          mapfile -t GATEWAYS <<< "${{ steps.deployment.outputs.gateways }}"
+          TOTAL=${#GATEWAYS[@]}
+
+          # Give content a moment to propagate, then probe all gateways with retries.
+          sleep 5
+          SUCCESSFUL=0
+          for attempt in 1 2 3; do
+            SUCCESSFUL=0
+            for gateway in "${GATEWAYS[@]}"; do
+              if curl -s --head --max-time 30 "$gateway" > /dev/null; then
+                echo "✅ $gateway - accessible"
+                SUCCESSFUL=$((SUCCESSFUL + 1))
+              else
+                echo "❌ $gateway - not accessible"
+              fi
+            done
+            if [ "$SUCCESSFUL" -gt 0 ]; then
+              break
+            fi
+            echo "⚠️ No gateway accessible yet (attempt $attempt), retrying..."
+            sleep 15
+          done
+
+          echo "📊 Accessibility: $SUCCESSFUL/$TOTAL gateways"
+          # Only fail if NOT a single gateway served the content.
+          if [ "$SUCCESSFUL" -eq 0 ]; then
+            echo "❌ No gateway is accessible"
+            exit 1
+          fi
+          echo "✅ At least one gateway is accessible"
+
       - name: Summary
         if: success()
         run: |
-          cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          ## ✅ Pinata IPFS Deployment Complete
+          IPFS_HASH="${{ steps.deployment.outputs.ipfs_hash }}"
+          PINATA_URL="${{ steps.deployment.outputs.pinata_url }}"
 
-          - **Environment**: \`${{ inputs.environment }}\`
-          - **Project**: \`${{ inputs.project_name }}\`
-          - **IPFS Hash**: \`${{ steps.deployment.outputs.ipfs_hash }}\`
-          - **Pinata URL**: [${{ steps.deployment.outputs.pinata_url }}](${{ steps.deployment.outputs.pinata_url }})
-          EOF
+          # Gateway list comes from the deploy script (first = primary/dedicated).
+          mapfile -t GATEWAYS <<< "${{ steps.deployment.outputs.gateways }}"
+
+          # Derive both CID representations (v0 base58 "Qm...", v1 base32 "bafy...").
+          CID_V0="$IPFS_HASH"
+          CID_V1="$IPFS_HASH"
+          if CID_OUT="$(node pinata/scripts/cid-convert.mjs "$IPFS_HASH" 2>/dev/null)"; then
+            # Parse the key=value lines explicitly (never eval untrusted output).
+            while IFS='=' read -r key value; do
+              case "$key" in
+                cid_v0) CID_V0="$value" ;;
+                cid_v1) CID_V1="$value" ;;
+              esac
+            done <<< "$CID_OUT"
+          fi
+
+          {
+            echo "# 🚀 ${{ inputs.environment }} Deployment Complete"
+            echo ''
+            echo '## 📊 Deployment Details'
+            echo "- **Environment**: \`${{ inputs.environment }}\`"
+            echo "- **Project**: \`${{ inputs.project_name }}\`"
+            echo "- **Branch**: \`${{ github.ref_name }}\`"
+            echo "- **Commit**: \`${{ github.sha }}\`"
+            echo "- **Timestamp**: \`$(date -Iseconds)\`"
+            echo ''
+            echo '## 🌐 Primary Access URL'
+            echo "- **Pinata Gateway**: [${GATEWAYS[0]}](${GATEWAYS[0]})"
+            echo ''
+            echo '## 🔗 Alternative Gateways'
+            for gw in "${GATEWAYS[@]:1}"; do
+              echo "- [${gw}](${gw})"
+            done
+            echo ''
+            echo '## 📋 Technical Details'
+            echo "- **CID (v0)**: \`${CID_V0}\`"
+            echo "- **CID (v1)**: \`${CID_V1}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

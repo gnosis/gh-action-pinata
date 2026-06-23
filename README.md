@@ -1,14 +1,19 @@
 # gh-action-pinata
 
-Reusable GitHub Actions workflow to deploy static builds to **IPFS via Pinata**.
+Reusable GitHub Actions workflow to deploy **prebuilt** static files to **IPFS via Pinata**.
+
+This workflow is **deploy-only**: you build your app in your own job, upload the
+output as an artifact, then call this workflow to publish that artifact to IPFS.
+It does not check out or build your repo.
 
 ## Features
 
-- Deploy static build directories to IPFS via Pinata
+- Deploy a prebuilt artifact to IPFS via Pinata
 - Input validation and error handling
 - Automatic retry logic for network failures
 - Deployment metadata and artifact uploads
-- Support for multiple build systems (npm, pnpm, yarn)
+- Post-deploy health checks across multiple IPFS gateways
+- Job summary with access URLs and both CIDv0 and CIDv1
 - Configurable timeouts and resource management
 
 ## Quick Start
@@ -23,7 +28,9 @@ Create an organization secret in GitHub:
 
 ### 2. Create caller workflow
 
-Create `.github/workflows/deploy-ipfs-dev.yml` in your application repo:
+In your application repo, build the app in one job and call this workflow in a
+dependent job. The deploy job downloads the artifact uploaded by the build job
+(both jobs must be in the **same workflow run**).
 
 ```yaml
 name: Deploy to IPFS
@@ -33,34 +40,49 @@ on:
     branches: [dev, develop]
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci && npm run build   # use whatever toolchain you like
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site-build
+          path: out                    # your build output directory
+
   deploy:
-    uses: <ORG>/gh-action-pinata/.github/workflows/pinata-deploy.yml@main
+    needs: build
+    uses: <ORG>/gh-action-pinata/.github/workflows/pinata-deployment.yml@main
     with:
       environment: dev
       project_name: my-app
+      build_artifact_name: site-build
       build_dir: out
     secrets:
       PINATA_JWT: ${{ secrets.PINATA_JWT }}
 ```
 
+> The build job is entirely yours — any language, package manager, or toolchain.
+> This workflow only consumes the resulting artifact.
+
 ## Workflow Inputs
 
 ### Required
 
-- `environment`: Deployment environment (`dev` or `prod`)
+- `environment`: Deployment environment name slug — `^[a-zA-Z0-9_-]+$` (e.g. `dev`, `prod`, `staging`)
 - `project_name`: Project name (used for Pinata metadata)
+- `build_artifact_name`: Name of the prebuilt artifact (uploaded earlier in the same run) to deploy
 
 ### Optional
 
-- `node_version`: Node.js version (default: `"20.15.1"`)
-- `cache`: Dependency cache manager for `actions/setup-node` (`npm`, `pnpm`, or `yarn`; default: `"npm"`)
 - `pinata_upload_timeout_ms`: Pinata upload HTTP request timeout in milliseconds (default: `300000`)
-- `install_command`: Command to install dependencies (default: `"npm ci"`)
-- `build_command`: Command to build the project (default: `"npm run build"`)
-- `build_dir`: Build output directory relative to repo root (default: `"out"`)
-- `caller_repository`: Override caller repository (default: caller's repo)
-- `caller_ref`: Override git ref to deploy (default: caller's ref)
+- `build_dir`: Directory the artifact is extracted into and deployed from (default: `"out"`)
+- `pinata_action_repository`: Repo to source this action from (default: `"gnosis/gh-action-pinata"`)
 - `pinata_action_ref`: Git ref for pinata action repo (default: `"main"`)
+- `health_check`: Run post-deploy gateway health checks (default: `true`)
 
 ### Secrets
 
@@ -68,39 +90,34 @@ jobs:
 
 ## Workflow Outputs
 
-- `ipfs_hash`: Deployed IPFS hash
-- `pinata_url`: Pinata gateway URL for the deployment
+- `ipfs_hash`: Deployed IPFS hash (CIDv0)
+- `pinata_url`: Dedicated gateway URL for the deployment (`https://gnosis.mypinata.cloud/ipfs/<hash>/`)
+
+## Deployment Summary
+
+On success the workflow writes a job summary containing:
+
+- **Primary access URL**: the dedicated Pinata gateway (`gnosis.mypinata.cloud`)
+- **Alternative gateways**: public IPFS gateways (`ipfs.io`, `dweb.link`)
+- **Both CIDs**: CIDv0 (`Qm…`) and CIDv1 (`bafy…`)
+
+The gateway list is owned by [`scripts/deploy-to-pinata.sh`](scripts/deploy-to-pinata.sh) — edit the `IPFS_GATEWAYS` array there to change which gateways are used and reported.
 
 ## Examples
 
-### Basic deployment
+### Larger uploads
 
 ```yaml
 jobs:
   deploy:
-    uses: <ORG>/gh-action-pinata/.github/workflows/pinata-deploy.yml@main
+    needs: build
+    uses: <ORG>/gh-action-pinata/.github/workflows/pinata-deployment.yml@main
     with:
       environment: prod
       project_name: my-website
+      build_artifact_name: site-build
       # Optional: increase if uploads are large/slow
       pinata_upload_timeout_ms: 600000
-    secrets:
-      PINATA_JWT: ${{ secrets.PINATA_JWT }}
-```
-
-### Custom build system (pnpm)
-
-```yaml
-jobs:
-  deploy:
-    uses: <ORG>/gh-action-pinata/.github/workflows/pinata-deploy.yml@main
-    with:
-      environment: prod
-      project_name: my-app
-      cache: pnpm
-      install_command: pnpm install --frozen-lockfile
-      build_command: pnpm build
-      build_dir: dist
     secrets:
       PINATA_JWT: ${{ secrets.PINATA_JWT }}
 ```
@@ -110,36 +127,38 @@ jobs:
 ```yaml
 jobs:
   deploy:
-    uses: <ORG>/gh-action-pinata/.github/workflows/pinata-deploy.yml@main
+    needs: build
+    uses: <ORG>/gh-action-pinata/.github/workflows/pinata-deployment.yml@main
     with:
       environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
       project_name: my-app
+      build_artifact_name: site-build
     secrets:
       PINATA_JWT: ${{ github.ref == 'refs/heads/main' && secrets.PINATA_JWT_PROD || secrets.PINATA_JWT_DEV }}
 ```
 
 ## How It Works
 
-1. **Checkout**: Checks out both the caller repo and this pinata action repo
-2. **Build**: Installs dependencies and builds the caller repo
-3. **Validate**: Validates build output exists and contains files
-4. **Upload**: Uploads build directory to Pinata via IPFS (Pinata uploader deps are installed with `pnpm` using this repo’s `pnpm-lock.yaml`)
-5. **IPNS** (optional): Publishes to IPNS for stable URLs
+1. **Checkout**: Checks out this pinata action repo (for the uploader scripts)
+2. **Download**: Downloads the prebuilt artifact (`build_artifact_name`) into `build_dir`
+3. **Validate**: Validates the extracted directory exists and contains files
+4. **Upload**: Uploads the directory to Pinata via IPFS (uploader deps installed with `pnpm` using this repo’s `pnpm-lock.yaml`)
+5. **Health check** (optional): Verifies the deployment is reachable across gateways
 6. **Artifacts**: Uploads deployment metadata as artifacts
 
 ## Troubleshooting
 
-### Build directory not found
+### Artifact directory not found
 
-**Error**: `Build directory 'caller/out' not found after build`
+**Error**: `Artifact directory 'out' not found after download`
 
-**Solution**: Check that your `build_command` actually creates the `build_dir`. Verify the directory name matches your build output.
+**Solution**: Confirm the build job ran `upload-artifact` with a `name` matching `build_artifact_name`, and that both jobs are in the same workflow run (the deploy job uses `needs:` on the build job).
 
-### Empty build directory
+### Empty artifact directory
 
-**Error**: `Build directory is empty`
+**Error**: `Artifact directory is empty`
 
-**Solution**: Ensure your build command produces files. Check build logs for errors.
+**Solution**: Ensure your build job produced files and uploaded the correct `path`. Check the build job logs.
 
 ### Pinata authentication failed
 
@@ -156,7 +175,7 @@ jobs:
 
 **Solution**: 
 - The workflow includes automatic retries with exponential backoff
-- Large builds may take longer - check Pinata dashboard for upload status
+- Large uploads may take longer - check Pinata dashboard for upload status, or raise `pinata_upload_timeout_ms`
 - Verify network connectivity from GitHub Actions
 
 ### Invalid IPFS hash
